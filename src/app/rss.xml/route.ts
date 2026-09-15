@@ -18,23 +18,26 @@ function buildRss(origin: string, items: NewsItem[]): string {
   const entries = items
     .map((item) => {
       const link = `${origin}/item/${item.id}`;
+      const grade = item.grade === "breaking" ? "속보" : item.grade === "important" ? "중요" : "참고";
+      const title = `[${grade}]${item.tip ? "[팁]" : ""} ${item.title}`;
+      const desc = `${item.takeaway} (출처: ${item.source})`;
       return `    <item>
-      <title>${xml(item.title)}</title>
+      <title>${xml(title)}</title>
       <link>${xml(link)}</link>
-      <guid isPermaLink="false">${xml(item.id)}</guid>
+      <guid isPermaLink="true">${xml(link)}</guid>
       <pubDate>${new Date(item.publishedAt).toUTCString()}</pubDate>
-      <source url="${xml(item.sourceUrl)}">${xml(item.source)}</source>
-      <description>${xml(item.takeaway)}</description>
+      <description>${xml(desc)}</description>
     </item>`;
     })
     .join("\n");
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>brief_ — 실시간 AI 뉴스</title>
     <link>${xml(origin)}</link>
-    <description>한국 AI 실무자를 위한 속보·중요·참고 피드</description>
+    <atom:link href="${xml(`${origin}/rss.xml`)}" rel="self" type="application/rss+xml"/>
+    <description>한국 AI 실무자를 위한 실시간 AI 업계 뉴스. 15분마다 자동 수집, 중요도 분류·한국어 요약 제공.</description>
     <language>ko</language>
     <lastBuildDate>${new Date(latest).toUTCString()}</lastBuildDate>
 ${entries}

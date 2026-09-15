@@ -22,7 +22,8 @@ export async function generateMetadata({
   const { id } = await params;
   const { item } = await getItem(id);
   if (!item) return { title: "없는 소식" };
-  return { title: item.title, description: item.takeaway };
+  const grade = item.grade === "breaking" ? "속보" : item.grade === "important" ? "중요" : "참고";
+  return { title: `[${grade}] ${item.title}`, description: item.takeaway };
 }
 
 export default async function ItemPage({ params }: { params: Promise<{ id: string }> }) {
@@ -114,7 +115,7 @@ export default async function ItemPage({ params }: { params: Promise<{ id: strin
             실시간 피드 보기 →
           </Link>
           <NotifyButton variant="cta" />
-          <Link href="/rss" className="font-mono-ts text-[12px] text-muted transition-colors hover:text-fg">
+          <Link href="/rss.xml" className="font-mono-ts text-[12px] text-muted transition-colors hover:text-fg">
             RSS 구독
           </Link>
         </div>
@@ -152,7 +153,7 @@ function ListSection({ title, items }: { title: string; items: NewsItem[] }) {
       <ul className="mt-2 space-y-1.5">
         {items.map((i) => (
           <li key={i.id} className="text-[13px]">
-            <Link href={`/item/${i.id}`} className="text-fg hover:text-head hover:underline">
+            <Link href={`/item/${i.id}`} className="text-fg hover:text-white hover:underline">
               <span className="mr-1.5 font-mono-ts text-[11px]" style={{ color: color(i.grade) }}>
                 [{label(i.grade)}]
               </span>

@@ -1,0 +1,18 @@
+{
+  "name": "brief_ — 실시간 AI 뉴스",
+  "short_name": "brief_",
+  "description": "한국 AI 실무자를 위한 실시간 AI 뉴스 터미널",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0e14",
+  "theme_color": "#0a0e14",
+  "lang": "ko",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

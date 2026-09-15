@@ -16,7 +16,8 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { slug } = await params;
   const topic = TOPIC_MAP[slug];
-  return { title: `#${topic?.label ?? slug}` };
+  const label = topic?.label ?? slug;
+  return { title: `${label} 최신 뉴스` };
 }
 
 export default async function TopicPage({
@@ -34,16 +35,17 @@ export default async function TopicPage({
     <main>
       <div className="mx-auto max-w-4xl px-3 sm:px-6">
         <header className="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-bg/95 py-3 backdrop-blur">
-          <Wordmark withTag />
-          <Link href="/" className="font-mono-ts text-xs text-muted hover:text-head">
+          <Wordmark href="/" size="sm" muted withTag />
+          <Link href="/" className="font-mono-ts text-xs text-muted hover:text-white">
             전체 피드
           </Link>
         </header>
         <TopicBar active={slug} />
         <div className="border-b border-line px-3 py-4">
-          <p className="font-mono-ts text-[11px] text-muted">토픽</p>
-          <h1 className="mt-1 text-xl font-bold text-head">#{label}</h1>
-          <p className="mt-1 font-mono-ts text-xs text-muted">{items.length}건</p>
+          <h1 className="text-xl font-bold text-head">{label} 최신 뉴스</h1>
+          <p className="mt-1 font-mono-ts text-xs text-muted">
+            {label} 관련 소식 {items.length}건 · 15분마다 자동 수집
+          </p>
         </div>
         {items.length === 0 ? (
           <p className="px-3 py-16 text-center font-mono-ts text-sm text-muted">

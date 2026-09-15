@@ -98,6 +98,30 @@ export function parseNewsMarkdown(raw: string): IngestPayload {
   };
 }
 
+/**
+ * RSS/Atom 본문을 바이트에서 문자열로. 국내 매체 일부는 EUC-KR/CP949.
+ * Content-Type charset과 XML declaration encoding을 본다.
+ */
+export function decodeFeedBytes(buf: Uint8Array, contentType = ""): string {
+  const head = new TextDecoder("latin1").decode(buf.subarray(0, 512));
+  const fromHeader = /charset\s*=\s*["']?([A-Za-z0-9._-]+)/i.exec(contentType)?.[1];
+  const fromXml = /encoding\s*=\s*["']?\s*([A-Za-z0-9._-]+)/i.exec(head)?.[1];
+  const raw = (fromHeader || fromXml || "utf-8").toLowerCase().replace(/_/g, "-");
+  const label =
+    raw === "euc-kr" ||
+    raw === "ks-c-5601-1987" ||
+    raw === "ksc5601" ||
+    raw === "cp949" ||
+    raw === "windows-949"
+      ? "euc-kr"
+      : "utf-8";
+  try {
+    return new TextDecoder(label).decode(buf);
+  } catch {
+    return new TextDecoder("utf-8").decode(buf);
+  }
+}
+
 const AMP = "\u0026";
 const LT = "\u003c";
 const GT = "\u003e";

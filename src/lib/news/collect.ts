@@ -5,7 +5,7 @@ import {
   INGEST_MAX_BATCH,
   NEWS_SOURCES,
 } from "./sources";
-import { parseFeedXml, parseNewsMarkdown } from "./parse";
+import { decodeFeedBytes, parseFeedXml, parseNewsMarkdown } from "./parse";
 import {
   beginRun,
   ensureSeeded,
@@ -128,7 +128,8 @@ async function pullRss(): Promise<RawEntry[]> {
           signal: AbortSignal.timeout(8000),
         });
         if (!res.ok) return [] as RawEntry[];
-        const xml = await res.text();
+        const buf = new Uint8Array(await res.arrayBuffer());
+        const xml = decodeFeedBytes(buf, res.headers.get("content-type") ?? "");
         return parseFeedXml(xml, src.name).map((e) => ({
           title: e.title,
           sourceUrl: e.link,
@@ -206,6 +207,7 @@ async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
 
 function fallbackPayload(entry: RawEntry): IngestPayload {
   const takeaway = (entry.summary || entry.title).slice(0, 160);
+  const topics = guessTopics(`${entry.title} ${entry.summary} ${entry.source}`);
   return {
     title: entry.title.slice(0, 180),
     takeaway,
@@ -215,7 +217,7 @@ function fallbackPayload(entry: RawEntry): IngestPayload {
     originalTitle: entry.title,
     grade: "note",
     tip: false,
-    topics: guessTopics(`${entry.title} ${entry.summary}`),
+    topics,
     publishedAt: entry.date,
   };
 }
@@ -230,18 +232,35 @@ function guessTopics(text: string): string[] {
     ["claude", "claude"],
     ["gemini", "google"],
     ["google", "google"],
+    ["deepmind", "google"],
     ["xai", "xai"],
     ["grok", "xai"],
     ["agent", "agent"],
+    ["에이전트", "agent"],
     ["local", "local-llm"],
     ["open source", "open-source"],
     ["opensource", "open-source"],
+    ["오픈소스", "open-source"],
     ["nvidia", "hardware"],
     ["gpu", "hardware"],
+    ["hbm", "hardware"],
     ["secur", "security"],
     ["regulat", "regulation"],
+    ["규제", "regulation"],
     ["prompt", "prompt"],
+    ["프롬프트", "prompt"],
     ["benchmark", "benchmark"],
+    ["벤치마크", "benchmark"],
+    ["korea", "korea-ai"],
+    ["네이버", "korea-ai"],
+    ["삼성", "korea-ai"],
+    ["하이퍼클로바", "korea-ai"],
+    ["타임스", "korea-ai"],
+    ["zdnet", "korea-ai"],
+    ["전자신문", "korea-ai"],
+    ["디지털투데이", "korea-ai"],
+    ["aitimes", "korea-ai"],
+    ["etnews", "korea-ai"],
   ];
   for (const [k, slug] of rules) {
     if (t.includes(k) && !found.includes(slug)) found.push(slug);

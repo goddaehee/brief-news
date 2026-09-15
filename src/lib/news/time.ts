@@ -13,16 +13,19 @@ export function formatClock(ms: number): string {
   return `${hh}:${mm}:${ss}`;
 }
 
-export function formatKstLong(ms: number): string {
+export function formatKstLong(ms: number, withSeconds = false): string {
   const d = new Date(ms + KST_OFFSET_MS);
   const y = d.getUTCFullYear();
   const mo = d.getUTCMonth() + 1;
   const day = d.getUTCDate();
   const h = d.getUTCHours();
   const m = String(d.getUTCMinutes()).padStart(2, "0");
+  const s = String(d.getUTCSeconds()).padStart(2, "0");
   const ap = h < 12 ? "오전" : "오후";
   const h12 = h % 12 === 0 ? 12 : h % 12;
-  return `${y}. ${mo}. ${day}. ${ap} ${h12}:${m} KST`;
+  return withSeconds
+    ? `${y}. ${mo}. ${day}. ${ap} ${h12}:${m}:${s}`
+    : `${y}. ${mo}. ${day}. ${ap} ${h12}:${m} KST`;
 }
 
 export function formatRelative(ms: number, now = Date.now()): string {

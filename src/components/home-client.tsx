@@ -57,7 +57,7 @@ export function HomeClient({ data }: { data: FeedPayload }) {
             <button
               type="button"
               onClick={loadMore}
-              className="rounded border border-line-strong px-5 py-2 font-mono-ts text-xs text-fg transition-colors hover:border-muted hover:text-head"
+              className="rounded border border-line-strong px-5 py-2 font-mono-ts text-xs text-fg transition-colors hover:border-muted hover:text-white"
             >
               더 보기 ↓
             </button>

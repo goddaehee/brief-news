@@ -36,12 +36,12 @@ export function FilterBar({
             className={cn(
               "rounded-full px-3 py-1 font-mono-ts text-xs transition-colors",
               active
-                ? "bg-white/10 text-head shadow-[inset_0_-2px_0_#e6edf3]"
+                ? "bg-white/10 text-white shadow-[inset_0_-2px_0_#e6edf3]"
                 : "text-muted hover:bg-white/[0.04] hover:text-fg",
             )}
           >
             {tab.label}
-            <span className="ml-1.5 text-[10px] text-muted/70">{counts[tab.key]}</span>
+            <span className="ml-1.5 text-muted/70">{counts[tab.key]}</span>
           </button>
         );
       })}

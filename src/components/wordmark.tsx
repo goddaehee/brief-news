@@ -18,7 +18,7 @@ export function Wordmark({
       className={cn(
         "font-mono-ts font-bold tracking-tight",
         size === "md" ? "text-lg" : "text-sm",
-        muted ? "text-muted hover:text-head" : "text-head",
+        muted ? "text-muted hover:text-white" : "text-white",
       )}
     >
       {muted ? <span className="mr-1 font-normal">← </span> : null}

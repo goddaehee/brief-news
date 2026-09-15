@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { GradeBadge, TipBadge } from "./grade-badge";
-import { formatClock, formatRelative } from "@/lib/news/time";
+import { formatClock, formatKstLong, formatRelative } from "@/lib/news/time";
 import type { NewsItem } from "@/lib/news/types";
 import { cn } from "@/lib/utils";
 
@@ -38,6 +38,7 @@ export function NewsRow({
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <time
           className="font-mono-ts text-xs text-muted"
+          title={formatKstLong(item.publishedAt, true)}
           dateTime={new Date(item.publishedAt).toISOString()}
         >
           {formatClock(item.publishedAt)}

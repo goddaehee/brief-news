@@ -147,9 +147,30 @@
   line-height: 1.7;
 }
 
+.legal ol {
+  margin: 0.4rem 0 1rem;
+  padding-left: 1.35rem;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
 .legal li {
   margin: 0.35rem 0;
+}
+
+.legal ul > li {
   list-style: disc;
+}
+
+.legal ol > li {
+  list-style: decimal;
+}
+
+.legal h3 {
+  margin: 1.1rem 0 0.4rem;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-head);
 }
 
 .legal strong {

@@ -76,15 +76,15 @@ export function ItemActions({ item }: { item: NewsItem }) {
         onClick={copyLink}
         className="rounded border border-line-strong px-3 py-1.5 font-mono-ts text-[12px] text-fg transition-colors hover:border-muted hover:text-head"
       >
-        링크 복사
+        🔗 링크 복사
       </button>
       <button
         type="button"
         onClick={shareThreads}
         className="font-mono-ts text-[12px] text-muted transition-colors hover:text-head"
-        title="공유 문구 자동 복사"
+        title="Threads에 공유 (문구 자동 복사)"
       >
-        @ 공유
+        @ Threads 공유
       </button>
     </div>
   );
