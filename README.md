@@ -49,7 +49,23 @@ GitHub Actions로 15분마다 `.md`를 커밋하면 월 무료 분이 부족하�
 3. GitHub에 올리고 Vercel 배포, `DATABASE_URL` · `XAI_API_KEY` 연결
 4. **마지막:** 리눅스 cron이 배포 URL의 `/api/collect`를 치게 한다
 
-사이트가 비어 있어도, 버튼 **지금 수집**과 편성 데스크로 글을 넣을 수 있다. 시계는 배포 URL이 안정된 뒤에 붙인다.
+사이트가 비어 있어도, 헤더 **수집**과 `/desk` 편성 데스크로 글을 넣을 수 있다. 시계는 배포 URL이 안정된 뒤에 붙인다.
+
+이 저장소는 Vercel Import가 가능하도록 **public** 이다. 시크릿은 커밋하지 않는다.
+
+### 대시보드에서 할 일 (여기 샌드박스에서 못 끝낸 것)
+
+Vercel GitHub App이 이 계정에 설치되어 있지 않아, 여기서 프로젝트를 만들어도 Git 연결이 404가 난다. **새로 프로젝트를 만들지 말고** 아래만 하면 된다.
+
+1. [github.com/goddaehee/brief-news](https://github.com/goddaehee/brief-news) 가 public인지 확인
+2. [vercel.com/new](https://vercel.com/new) → Import `goddaehee/brief-news`
+   - GitHub App 권한을 이 저장소에 허용
+   - 이름이 `brief-news` 또는 `brief-terminal` 로 이미 보이면 **그걸 골라 Git 연결**. 같은 이름 프로젝트를 또 만들지 말 것
+3. Environment Variables
+   - `DATABASE_URL` — Neon Postgres (풀링 커넥션 문자열)
+   - `XAI_API_KEY` — 분류·한국어 요약. 없으면 원문 제목 폴백
+   - `COLLECT_SECRET` — 크론 붙이는 그 커밋에서
+4. 배포 URL이 200으로 열린 뒤, 아래 크론 절을 따른다
 
 ---
 

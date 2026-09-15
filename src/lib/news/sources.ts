@@ -2,6 +2,8 @@ export type NewsSource = {
   id: string;
   name: string;
   rss: string;
+  /** General-news wires. Only keep items whose TITLE looks like AI. */
+  titleMustMatch?: boolean;
 };
 
 /** Public RSS endpoints the collector pulls. The same list is what a cron hits. */
@@ -25,16 +27,13 @@ export const NEWS_SOURCES: NewsSource[] = [
     id: "zdnet",
     name: "ZDNet Korea",
     rss: "https://www.zdnet.co.kr/feed",
+    titleMustMatch: true,
   },
   {
     id: "etnews",
     name: "전자신문",
     rss: "https://rss.etnews.com/Section901.xml",
-  },
-  {
-    id: "digitaltoday",
-    name: "디지털투데이",
-    rss: "https://www.digitaltoday.co.kr/rss/allArticle.xml",
+    titleMustMatch: true,
   },
   {
     id: "techcrunch",

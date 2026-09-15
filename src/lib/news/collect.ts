@@ -20,7 +20,9 @@ import type { CollectResult, Grade, IngestPayload } from "./types";
 
 const ALLOWED_TOPICS = Object.keys(TOPIC_MAP);
 const AI_HINT =
-  /\b(ai|a\.i\.|llm|gpt|claude|gemini|grok|openai|anthropic|xai|nvidia|gpu|agent|모델|인공지능|챗봇|딥러닝)\b/i;
+  /\b(ai|a\.i\.|llm|gpt-?\d*|chatgpt|claude|gemini|grok|openai|anthropic|xai|nvidia|hbm|gpu|agent|인공지능|생성형|챗봇|딥러닝|에이전트|언어\s*모델|파운데이션\s*모델)\b/i;
+const SKIP_HINT =
+  /장내매수|최대주주|액면병합|변경상장|유상증자|무상증자|주식\s*취득|임원\s*변동|거래정지|시간외|배당\s*공시/;
 
 export async function collectOnce(): Promise<CollectResult> {
   await ensureSeeded();
@@ -114,7 +116,14 @@ type RawEntry = {
   source: string;
   date: number;
   summary: string;
+  titleMustMatch?: boolean;
 };
+
+function keepEntry(e: RawEntry): boolean {
+  if (SKIP_HINT.test(e.title) || SKIP_HINT.test(e.summary)) return false;
+  const target = e.titleMustMatch ? e.title : `${e.title} ${e.summary}`;
+  return AI_HINT.test(target);
+}
 
 async function pullRss(): Promise<RawEntry[]> {
   const results = await Promise.all(
@@ -136,6 +145,7 @@ async function pullRss(): Promise<RawEntry[]> {
           source: src.name,
           date: e.date,
           summary: e.summary,
+          titleMustMatch: Boolean(src.titleMustMatch),
         }));
       } catch {
         return [] as RawEntry[];
@@ -144,7 +154,7 @@ async function pullRss(): Promise<RawEntry[]> {
   );
   return results
     .flat()
-    .filter((e) => AI_HINT.test(`${e.title} ${e.summary} ${e.source}`))
+    .filter(keepEntry)
     .sort((a, b) => b.date - a.date)
     .filter((e, i, arr) => arr.findIndex((x) => x.sourceUrl === e.sourceUrl) === i);
 }
