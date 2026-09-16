@@ -42,11 +42,12 @@ export default function Privacy() {
           <strong>Vercel Inc. (미국)</strong> — 웹사이트 호스팅 및 서버 로그 처리
         </li>
         <li>
-          <strong>Neon Inc. (미국·싱가포르)</strong> — 데이터베이스 호스팅
+          <strong>Supabase (AWS)</strong> — 데이터베이스 호스팅. `DATABASE_URL`이 가리키는
+          Postgres.
         </li>
         <li>
-          <strong>xAI (미국)</strong> — 뉴스 콘텐츠의 AI 요약 처리. 이용자의 개인정보는 전송되지
-          않으며, 공개된 뉴스 콘텐츠만 처리됩니다.
+          <strong>설정된 LLM 제공자</strong> — 뉴스 콘텐츠의 AI 요약 처리(xAI, GLM 등 OpenAI
+          호환). 이용자의 개인정보는 전송되지 않으며, 공개된 뉴스 콘텐츠만 처리됩니다.
         </li>
       </ul>
       <p>서비스는 위탁계약 시 개인정보가 안전하게 관리되도록 필요한 사항을 규정합니다.</p>

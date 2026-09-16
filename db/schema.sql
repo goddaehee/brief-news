@@ -1,4 +1,5 @@
 -- Shared news corpus. Unowned rows (no user_id): world-readable feed.
+-- Postgres 어느 호스트나 됨. 권장: 이미 쓰는 Supabase (Transaction pooler, 포트 6543).
 create table if not exists news_items (
   id text primary key,
   published_at timestamptz not null,
@@ -34,3 +35,11 @@ create table if not exists ingest_runs (
   skipped int not null default 0,
   note text
 );
+
+-- 여러 PC cron이 동시에 쳐도 LLM을 한 번만 부르게.
+create table if not exists collect_lock (
+  id smallint primary key default 1 check (id = 1),
+  locked_at timestamptz,
+  owner text
+);
+insert into collect_lock (id) values (1) on conflict (id) do nothing;

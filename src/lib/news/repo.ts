@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { neon } from "@neondatabase/serverless";
+import postgres from "postgres";
 import { getBriefingDate, getBriefingLines, getSeedItems } from "./data";
 import type { Grade, IngestPayload, IngestRun, NewsItem } from "./types";
 
@@ -36,7 +36,15 @@ create table if not exists ingest_runs (
   skipped int not null default 0,
   note text
 );
+create table if not exists collect_lock (
+  id smallint primary key default 1 check (id = 1),
+  locked_at timestamptz,
+  owner text
+);
+insert into collect_lock (id) values (1) on conflict (id) do nothing
 `;
+
+const LOCK_STALE_MS = 8 * 60 * 1000;
 
 function hasDatabaseUrl(): boolean {
   return Boolean(process.env.DATABASE_URL?.trim());
@@ -46,14 +54,29 @@ function makeItemId(sourceUrl: string): string {
   return createHash("sha1").update(sourceUrl).digest("hex").slice(0, 12);
 }
 
-type NeonSql = (query: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
+type SqlFn = (query: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 
-function getNeon(): NeonSql {
-  const url = process.env.DATABASE_URL!.trim();
-  const sql = neon(url);
+const g = globalThis as typeof globalThis & {
+  __briefMem__?: Mem;
+  __briefPg__?: ReturnType<typeof postgres>;
+};
+
+function getSql(): SqlFn {
+  if (!g.__briefPg__) {
+    const url = process.env.DATABASE_URL!.trim();
+    g.__briefPg__ = postgres(url, {
+      max: 1,
+      idle_timeout: 20,
+      connect_timeout: 10,
+      prepare: false,
+      ssl: "require",
+      onnotice: () => undefined,
+    });
+  }
+  const client = g.__briefPg__;
   return async (query, params = []) => {
-    const rows = await sql.query(query, params);
-    return rows as Record<string, unknown>[];
+    const rows = await client.unsafe(query, params as postgres.ParameterOrJSON<never>[]);
+    return rows as unknown as Record<string, unknown>[];
   };
 }
 
@@ -64,9 +87,9 @@ type Mem = {
   runs: IngestRun[];
   seeded: boolean;
   runSeq: number;
+  lockUntil: number;
+  lockOwner: string | null;
 };
-
-const g = globalThis as typeof globalThis & { __briefMem__?: Mem };
 
 function mem(): Mem {
   if (!g.__briefMem__) {
@@ -77,12 +100,14 @@ function mem(): Mem {
       runs: [],
       seeded: false,
       runSeq: 1,
+      lockUntil: 0,
+      lockOwner: null,
     };
   }
   return g.__briefMem__;
 }
 
-function mapNeonRow(row: Record<string, unknown>): NewsItem {
+function mapRow(row: Record<string, unknown>): NewsItem {
   let topics: string[] = [];
   try {
     const parsed = JSON.parse(String(row.topics ?? "[]"));
@@ -116,7 +141,7 @@ async function ensureSchema() {
   if (!hasDatabaseUrl()) return;
   if (!schemaPromise) {
     schemaPromise = (async () => {
-      const sql = getNeon();
+      const sql = getSql();
       for (const stmt of SCHEMA.split(";").map((s) => s.trim()).filter(Boolean)) {
         await sql(stmt);
       }
@@ -165,16 +190,53 @@ async function seedIfEmpty() {
   m.seeded = true;
 }
 
+export async function tryCollectLock(owner: string): Promise<boolean> {
+  await ensureSchema();
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    const rows = await sql(
+      `update collect_lock
+          set locked_at = now(), owner = $1
+        where id = 1
+          and (locked_at is null or locked_at < now() - interval '8 minutes')
+        returning id`,
+      [owner],
+    );
+    return rows.length > 0;
+  }
+  const m = mem();
+  const now = Date.now();
+  if (m.lockUntil > now) return false;
+  m.lockOwner = owner;
+  m.lockUntil = now + LOCK_STALE_MS;
+  return true;
+}
+
+export async function releaseCollectLock(owner: string): Promise<void> {
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    await sql(`update collect_lock set locked_at = null, owner = null where id = 1 and owner = $1`, [
+      owner,
+    ]);
+    return;
+  }
+  const m = mem();
+  if (m.lockOwner === owner) {
+    m.lockOwner = null;
+    m.lockUntil = 0;
+  }
+}
+
 export async function listNews(): Promise<NewsItem[]> {
   await ensureSchema();
   if (hasDatabaseUrl()) {
-    const sql = getNeon();
+    const sql = getSql();
     const rows = await sql(
-      `select id, (extract(epoch from published_at) * 1000)::bigint as published_ms,
+      `select id, (extract(epoch from published_at) * 1000) as published_ms,
               grade, tip, title, takeaway, summary, source, source_url, original_title, topics
          from news_items order by published_at desc limit 200`,
     );
-    return rows.map(mapNeonRow);
+    return rows.map(mapRow);
   }
   return [...mem().items.values()].sort((a, b) => b.publishedAt - a.publishedAt);
 }
@@ -182,21 +244,21 @@ export async function listNews(): Promise<NewsItem[]> {
 export async function getNewsById(id: string): Promise<NewsItem | undefined> {
   await ensureSchema();
   if (hasDatabaseUrl()) {
-    const sql = getNeon();
+    const sql = getSql();
     const rows = await sql(
-      `select id, (extract(epoch from published_at) * 1000)::bigint as published_ms,
+      `select id, (extract(epoch from published_at) * 1000) as published_ms,
               grade, tip, title, takeaway, summary, source, source_url, original_title, topics
          from news_items where id = $1`,
       [id],
     );
-    return rows[0] ? mapNeonRow(rows[0]) : undefined;
+    return rows[0] ? mapRow(rows[0]) : undefined;
   }
   return mem().items.get(id);
 }
 
 export async function sourceUrlExists(sourceUrl: string): Promise<boolean> {
   if (hasDatabaseUrl()) {
-    const sql = getNeon();
+    const sql = getSql();
     const rows = await sql(`select 1 as n from news_items where source_url = $1 limit 1`, [
       sourceUrl,
     ]);
@@ -210,7 +272,7 @@ export async function insertItem(payload: IngestPayload): Promise<boolean> {
   const publishedAt = payload.publishedAt ?? Date.now();
   const topics = payload.topics ?? [];
   if (hasDatabaseUrl()) {
-    const sql = getNeon();
+    const sql = getSql();
     const rows = await sql(
       `insert into news_items (
           id, published_at, grade, tip, title, takeaway, summary,
@@ -256,7 +318,7 @@ export async function insertItem(payload: IngestPayload): Promise<boolean> {
 
 export async function upsertBriefing(lines: string[], date = getBriefingDate()) {
   if (hasDatabaseUrl()) {
-    const sql = getNeon();
+    const sql = getSql();
     await sql(
       `insert into briefings (briefing_date, lines, updated_at)
        values ($1,$2,now())
@@ -271,7 +333,7 @@ export async function upsertBriefing(lines: string[], date = getBriefingDate()) 
 export async function getBriefing(): Promise<{ date: string; lines: string[] }> {
   const date = getBriefingDate();
   if (hasDatabaseUrl()) {
-    const sql = getNeon();
+    const sql = getSql();
     const rows = await sql(`select lines from briefings where briefing_date = $1`, [date]);
     if (!rows[0]) return { date, lines: [] };
     try {
@@ -286,10 +348,8 @@ export async function getBriefing(): Promise<{ date: string; lines: string[] }> 
 
 export async function beginRun(): Promise<number> {
   if (hasDatabaseUrl()) {
-    const sql = getNeon();
-    const rows = await sql(
-      `insert into ingest_runs (status) values ('running') returning id`,
-    );
+    const sql = getSql();
+    const rows = await sql(`insert into ingest_runs (status) values ('running') returning id`);
     return Number(rows[0]?.id);
   }
   const m = mem();
@@ -310,7 +370,7 @@ export async function finishRun(
   info: { status: string; fetched: number; inserted: number; skipped: number; note?: string },
 ) {
   if (hasDatabaseUrl()) {
-    const sql = getNeon();
+    const sql = getSql();
     await sql(
       `update ingest_runs set finished_at = now(), status = $2, fetched = $3, inserted = $4, skipped = $5, note = $6 where id = $1`,
       [id, info.status, info.fetched, info.inserted, info.skipped, info.note ?? null],
@@ -330,10 +390,10 @@ export async function finishRun(
 
 export async function listRuns(limit = 12): Promise<IngestRun[]> {
   if (hasDatabaseUrl()) {
-    const sql = getNeon();
+    const sql = getSql();
     const rows = await sql(
-      `select id, (extract(epoch from started_at) * 1000)::bigint as started_ms,
-              (extract(epoch from finished_at) * 1000)::bigint as finished_ms,
+      `select id, (extract(epoch from started_at) * 1000) as started_ms,
+              (extract(epoch from finished_at) * 1000) as finished_ms,
               status, fetched, inserted, skipped, note
          from ingest_runs order by id desc limit $1`,
       [limit],
@@ -354,9 +414,9 @@ export async function listRuns(limit = 12): Promise<IngestRun[]> {
 
 export async function lastRunAt(): Promise<number | null> {
   if (hasDatabaseUrl()) {
-    const sql = getNeon();
+    const sql = getSql();
     const rows = await sql(
-      `select (extract(epoch from finished_at) * 1000)::bigint as ms
+      `select (extract(epoch from finished_at) * 1000) as ms
          from ingest_runs
         where status <> 'seed' and finished_at is not null
         order by finished_at desc limit 1`,

@@ -1,5 +1,6 @@
 import { TOPIC_MAP } from "./topics";
 import { isSeedItem } from "./data";
+import { chatJson, resolveLlm } from "./llm";
 import {
   COLLECT_COOLDOWN_MS,
   COLLECT_MAX_NEW,
@@ -15,7 +16,9 @@ import {
   insertItem,
   lastRunAt,
   listNews,
+  releaseCollectLock,
   sourceUrlExists,
+  tryCollectLock,
   upsertBriefing,
 } from "./repo";
 import type { CollectResult, Grade, IngestPayload } from "./types";
@@ -26,105 +29,127 @@ const AI_HINT =
 const SKIP_HINT =
   /장내매수|최대주주|액면병합|변경상장|유상증자|무상증자|주식\s*취득|임원\s*변동|거래정지|시간외|배당\s*공시|youtube|youtu\.be|노트북 후보|특징주|테마주|급등주|상한가|하한가|공시\b|거주 세계|자사주/i;
 
+function lockOwner(): string {
+  return `brief-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export async function collectOnce(): Promise<CollectResult> {
   await ensureSeeded();
-  const last = await lastRunAt();
-  if (last && Date.now() - last < COLLECT_COOLDOWN_MS) {
+  const owner = lockOwner();
+  const locked = await tryCollectLock(owner);
+  if (!locked) {
     return {
       ok: true,
       status: "rate_limited",
       fetched: 0,
       inserted: 0,
       skipped: 0,
-      note: "최근 수집 후 10분이 지나지 않았습니다. 같은 파이프라인을 크론이 쳐도 중복 과금이 나지 않습니다.",
-      lastRunAt: last,
+      note: "다른 장비가 수집 중입니다. 같은 글을 두 번 요약하지 않습니다.",
+      lastRunAt: await lastRunAt(),
     };
   }
 
-  const runId = await beginRun();
-  let fetched = 0;
-  let inserted = 0;
-  let skipped = 0;
-
   try {
-    const existing = await listNews();
-    const entries = await pullRss();
-    fetched = entries.length;
-    const fresh: RawEntry[] = [];
-    for (const e of entries) {
-      if (await sourceUrlExists(e.sourceUrl)) {
-        skipped += 1;
-        continue;
-      }
-      if (
-        existing
-          .filter((i) => !isSeedItem(i))
-          .some(
-            (i) => tooSimilar(i.title, e.title) || tooSimilar(i.originalTitle, e.title),
-          ) ||
-        fresh.some((f) => tooSimilar(f.title, e.title))
-      ) {
-        skipped += 1;
-        continue;
-      }
-      fresh.push(e);
-      if (fresh.length >= COLLECT_MAX_NEW) break;
+    const last = await lastRunAt();
+    if (last && Date.now() - last < COLLECT_COOLDOWN_MS) {
+      return {
+        ok: true,
+        status: "rate_limited",
+        fetched: 0,
+        inserted: 0,
+        skipped: 0,
+        note: "최근 수집 후 10분이 지나지 않았습니다. 같은 파이프라인을 크론이 쳐도 중복 과금이 나지 않습니다.",
+        lastRunAt: last,
+      };
     }
 
-    const classified = await Promise.all(fresh.map((entry) => classifyEntry(entry)));
-    for (const payload of classified) {
-      if (payload.keep === false) {
-        skipped += 1;
-        continue;
+    const runId = await beginRun();
+    let fetched = 0;
+    let inserted = 0;
+    let skipped = 0;
+
+    try {
+      const existing = await listNews();
+      const entries = await pullRss();
+      fetched = entries.length;
+      const fresh: RawEntry[] = [];
+      for (const e of entries) {
+        if (await sourceUrlExists(e.sourceUrl)) {
+          skipped += 1;
+          continue;
+        }
+        if (
+          existing
+            .filter((i) => !isSeedItem(i))
+            .some(
+              (i) => tooSimilar(i.title, e.title) || tooSimilar(i.originalTitle, e.title),
+            ) ||
+          fresh.some((f) => tooSimilar(f.title, e.title))
+        ) {
+          skipped += 1;
+          continue;
+        }
+        fresh.push(e);
+        if (fresh.length >= COLLECT_MAX_NEW) break;
       }
-      const ok = await insertItem(payload);
-      if (ok) inserted += 1;
-      else skipped += 1;
+
+      const classified = await Promise.all(fresh.map((entry) => classifyEntry(entry)));
+      for (const payload of classified) {
+        if (payload.keep === false) {
+          skipped += 1;
+          continue;
+        }
+        const ok = await insertItem(payload);
+        if (ok) inserted += 1;
+        else skipped += 1;
+      }
+
+      if (inserted > 0) await refreshBriefing();
+
+      const note =
+        inserted > 0
+          ? `RSS ${fetched}건 중 ${inserted}건 편성${resolveLlm() ? "" : " · LLM 키 없음(원문 폴백)"}`
+          : fetched === 0
+            ? "RSS를 가져오지 못했습니다. 네트워크 또는 피드 주소를 확인하세요."
+            : "새 소식이 없거나 모두 중복입니다.";
+
+      await finishRun(runId, {
+        status: "ok",
+        fetched,
+        inserted,
+        skipped,
+        note,
+      });
+      return {
+        ok: true,
+        status: "ok",
+        fetched,
+        inserted,
+        skipped,
+        note,
+        lastRunAt: Date.now(),
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "collect failed";
+      await finishRun(runId, {
+        status: "error",
+        fetched,
+        inserted,
+        skipped,
+        note: message,
+      });
+      return {
+        ok: false,
+        status: "error",
+        fetched,
+        inserted,
+        skipped,
+        note: message,
+        lastRunAt: Date.now(),
+      };
     }
-
-    if (inserted > 0) await refreshBriefing();
-
-    const note =
-      inserted > 0
-        ? `RSS ${fetched}건 중 ${inserted}건 편성`
-        : fetched === 0
-          ? "RSS를 가져오지 못했습니다. 네트워크 또는 피드 주소를 확인하세요."
-          : "새 소식이 없거나 모두 중복입니다.";
-
-    await finishRun(runId, {
-      status: "ok",
-      fetched,
-      inserted,
-      skipped,
-      note,
-    });
-    return {
-      ok: true,
-      status: "ok",
-      fetched,
-      inserted,
-      skipped,
-      note,
-      lastRunAt: Date.now(),
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "collect failed";
-    await finishRun(runId, {
-      status: "error",
-      fetched,
-      inserted,
-      skipped,
-      note: message,
-    });
-    return {
-      ok: false,
-      status: "error",
-      fetched,
-      inserted,
-      skipped,
-      note: message,
-      lastRunAt: Date.now(),
-    };
+  } finally {
+    await releaseCollectLock(owner);
   }
 }
 
@@ -213,63 +238,33 @@ function tooSimilar(a: string, b: string): boolean {
 }
 
 async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
-  const apiKey = process.env.XAI_API_KEY;
-  if (!apiKey) return fallbackPayload(entry);
+  if (!resolveLlm()) return fallbackPayload(entry);
 
-  try {
-    const res = await fetch("https://api.x.ai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "grok-4.5",
-        max_tokens: 420,
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "당신은 한국 AI 실무자용 뉴스 터미널의 편집기다. 단순 번역이 아니라 ‘그래서 실무자가 뭘 하면 되는지’를 한 줄로 적는다. 말투: 짧고 단호. 존댓말·번역투 금지. 헤드라인은 한국 테크 매체 문장(주어 먼저, 핵심 수치, 말줄임표 …). 시사점은 두 문장 이내, 마침표로 끊는다. 속보는 장애·당일 출시·즉시 가격 변경만. 대부분은 참고. JSON만 출력.",
-          },
-          {
-            role: "user",
-            content: `원문 제목: ${entry.title}\n출처: ${entry.source}\n링크: ${entry.sourceUrl}\n발췌: ${entry.summary.slice(0, 600)}\n\nJSON 스키마:\n{"keep":true,"title":"한국어 헤드라인","takeaway":"한 줄 시사점","summary":"3~5문장 요약","grade":"breaking|important|note","tip":false,"topics":["openai"]}\nkeep=false 인 경우: 주식·공시·영상 라운드업·AI와 무관한 기사.\ntopics 허용값: ${ALLOWED_TOPICS.join(", ")}`,
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(20000),
-    });
-    if (!res.ok) return fallbackPayload(entry);
-    const body = (await res.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const text = body.choices?.[0]?.message?.content ?? "";
-    const json = extractJson(text);
-    if (!json) return fallbackPayload(entry);
-    if (json.keep === false) {
-      return { ...fallbackPayload(entry), keep: false };
-    }
-    return {
-      title: String(json.title || entry.title).slice(0, 180),
-      takeaway: String(json.takeaway || entry.summary).slice(0, 220),
-      summary: String(json.summary || entry.summary).slice(0, 1200),
-      source: entry.source,
-      sourceUrl: entry.sourceUrl,
-      originalTitle: entry.title,
-      grade: asGrade(json.grade),
-      tip: Boolean(json.tip),
-      topics: Array.isArray(json.topics)
-        ? json.topics.filter((t) => typeof t === "string" && TOPIC_MAP[t]).slice(0, 4)
-        : [],
-      publishedAt: entry.date,
-      keep: true,
-    };
-  } catch {
-    return fallbackPayload(entry);
+  const json = await chatJson({
+    system:
+      "당신은 한국 AI 실무자용 뉴스 터미널의 편집기다. 단순 번역이 아니라 ‘그래서 실무자가 뭘 하면 되는지’를 한 줄로 적는다. 말투: 짧고 단호. 존댓말·번역투 금지. 헤드라인은 한국 테크 매체 문장(주어 먼저, 핵심 수치, 말줄임표 …). 시사점은 두 문장 이내, 마침표로 끊는다. 속보는 장애·당일 출시·즉시 가격 변경만. 대부분은 참고. JSON만 출력.",
+    user: `원문 제목: ${entry.title}\n출처: ${entry.source}\n링크: ${entry.sourceUrl}\n발췌: ${entry.summary.slice(0, 600)}\n\nJSON 스키마:\n{"keep":true,"title":"한국어 헤드라인","takeaway":"한 줄 시사점","summary":"3~5문장 요약","grade":"breaking|important|note","tip":false,"topics":["openai"]}\nkeep=false 인 경우: 주식·공시·영상 라운드업·AI와 무관한 기사.\ntopics 허용값: ${ALLOWED_TOPICS.join(", ")}`,
+  });
+
+  if (!json) return fallbackPayload(entry);
+  if (json.keep === false) {
+    return { ...fallbackPayload(entry), keep: false };
   }
+  return {
+    title: String(json.title || entry.title).slice(0, 180),
+    takeaway: String(json.takeaway || entry.summary).slice(0, 220),
+    summary: String(json.summary || entry.summary).slice(0, 1200),
+    source: entry.source,
+    sourceUrl: entry.sourceUrl,
+    originalTitle: entry.title,
+    grade: asGrade(json.grade),
+    tip: Boolean(json.tip),
+    topics: Array.isArray(json.topics)
+      ? json.topics.filter((t) => typeof t === "string" && TOPIC_MAP[t]).slice(0, 4)
+      : [],
+    publishedAt: entry.date,
+    keep: true,
+  };
 }
 
 function fallbackPayload(entry: RawEntry): IngestPayload {
@@ -354,17 +349,6 @@ function guessTopics(text: string): string[] {
 
 function asGrade(v: unknown): Grade {
   return v === "breaking" || v === "important" || v === "note" ? v : "note";
-}
-
-function extractJson(text: string): Record<string, unknown> | null {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) return null;
-  try {
-    return JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
 }
 
 async function refreshBriefing() {
