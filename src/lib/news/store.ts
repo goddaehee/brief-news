@@ -37,11 +37,11 @@ export const PAGE = 20;
 
 export const useFeed = create<FeedState>((set, get) => ({
   filter: "all",
-  focused: 0,
+  focused: -1,
   visible: PAGE,
   notify: false,
   reactions: {},
-  setFilter: (filter) => set({ filter, focused: 0, visible: PAGE }),
+  setFilter: (filter) => set({ filter, focused: -1, visible: PAGE }),
   setFocused: (focused) => set({ focused }),
   loadMore: () => set({ visible: get().visible + PAGE }),
   resetVisible: () => set({ visible: PAGE }),

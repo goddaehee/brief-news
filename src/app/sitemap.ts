@@ -1,5 +1,6 @@
 import type { MetadataRoute } from "next";
 import { ensureSeeded, listNews } from "@/lib/news/repo";
+import { realFeedItems } from "@/lib/news/data";
 import { TOPICS } from "@/lib/news/topics";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +15,7 @@ function origin(): string {
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   await ensureSeeded();
-  const items = await listNews();
+  const items = realFeedItems(await listNews());
   const base = origin();
   const staticPaths = ["", "/about", "/terms", "/privacy", "/advertise", "/rss.xml"];
   const now = new Date();

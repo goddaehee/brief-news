@@ -44,9 +44,11 @@ export function ItemActions({ item }: { item: NewsItem }) {
     const gradeLabel =
       item.grade === "breaking" ? "속보" : item.grade === "important" ? "중요" : "참고";
     const text = `[${gradeLabel}] ${item.title}\n${item.takeaway}\n${window.location.href}`;
+    const intent = `https://www.threads.net/intent/post?text=${encodeURIComponent(text)}`;
+    window.open(intent, "_blank", "noopener,noreferrer");
     navigator.clipboard.writeText(text).then(
-      () => toast("공유 문구를 복사했습니다"),
-      () => toast("복사에 실패했습니다"),
+      () => toast("Threads 공유창을 열었습니다"),
+      () => toast("공유 문구 복사에 실패했습니다"),
     );
   }
 
@@ -82,7 +84,7 @@ export function ItemActions({ item }: { item: NewsItem }) {
         type="button"
         onClick={shareThreads}
         className="font-mono-ts text-[12px] text-muted transition-colors hover:text-head"
-        title="Threads에 공유 (문구 자동 복사)"
+        title="Threads에 공유"
       >
         @ Threads 공유
       </button>

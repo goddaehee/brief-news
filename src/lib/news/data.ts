@@ -656,6 +656,29 @@ export function getItemById(id: string, now = Date.now()): NewsItem | undefined 
   return hydrateNews(now).find((item) => item.id === id);
 }
 
+/** Demo corpus ids are 4-digit. Collected rows use a 12-char sha1. */
+export function isSeedItem(item: Pick<NewsItem, "id">): boolean {
+  return /^\d{4}$/.test(item.id);
+}
+
+/** Once real RSS rows exist, lead with them. Demo corpus fills out 어제. */
+export function publicFeedItems(items: NewsItem[], now = Date.now()): NewsItem[] {
+  const real = items.filter((i) => !isSeedItem(i)).sort((a, b) => b.publishedAt - a.publishedAt);
+  if (real.length < 3) return items;
+  const seed = items
+    .filter((i) => isSeedItem(i))
+    .map((item, idx) => ({
+      ...item,
+      publishedAt: now - (26 * 60 * 60 * 1000 + idx * 90 * 60 * 1000),
+    }));
+  return [...real, ...seed];
+}
+
+export function realFeedItems(items: NewsItem[]): NewsItem[] {
+  const real = items.filter((i) => !isSeedItem(i));
+  return real.length ? real : items;
+}
+
 export function filterItems(
   items: NewsItem[],
   key: "all" | "breaking" | "important" | "note" | "tip",

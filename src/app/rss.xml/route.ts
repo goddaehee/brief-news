@@ -1,4 +1,5 @@
 import { ensureSeeded, listNews } from "@/lib/news/repo";
+import { realFeedItems } from "@/lib/news/data";
 import type { NewsItem } from "@/lib/news/types";
 
 export const runtime = "nodejs";
@@ -63,7 +64,7 @@ ${entries}
 
 export async function GET(request: Request) {
   await ensureSeeded();
-  const items = await listNews();
+  const items = realFeedItems(await listNews());
   const origin = publicOrigin(request);
   return new Response(buildRss(origin, items.slice(0, 40)), {
     headers: {

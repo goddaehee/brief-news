@@ -35,6 +35,7 @@ export type IngestPayload = {
   tip: boolean;
   topics: string[];
   publishedAt?: number;
+  keep?: boolean;
 };
 
 export type CollectResult = {

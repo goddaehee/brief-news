@@ -28,7 +28,7 @@ export function NewsRow({
     <li
       id={`item-${item.id}`}
       className={cn(
-        "cursor-pointer border-b border-line border-l-2 px-3 py-2.5 transition-colors hover:bg-white/[0.03]",
+        "scroll-mt-28 cursor-pointer border-b border-line border-l-2 px-3 py-2.5 transition-colors hover:bg-white/[0.03]",
         accent,
         focused && "item-focused",
         now - item.publishedAt < 12 * 60_000 && "item-new",

@@ -6,7 +6,13 @@ import { CollectButton } from "./collect-button";
 import { NotifyButton } from "./notify-button";
 import { Wordmark } from "./wordmark";
 
-export function SiteHeader({ lastUpdated }: { lastUpdated: number }) {
+export function SiteHeader({
+  lastUpdated,
+  showCollect = false,
+}: {
+  lastUpdated: number;
+  showCollect?: boolean;
+}) {
   const [, tick] = useState(0);
   useEffect(() => {
     const id = window.setInterval(() => tick((n) => n + 1), 30_000);
@@ -25,7 +31,7 @@ export function SiteHeader({ lastUpdated }: { lastUpdated: number }) {
           {formatRelative(lastUpdated)}
           <span className="hidden sm:inline"> 업데이트</span>
         </span>
-        <CollectButton compact />
+        {showCollect ? <CollectButton compact /> : null}
         <NotifyButton />
       </div>
     </header>

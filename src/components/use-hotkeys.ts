@@ -20,23 +20,23 @@ export function useFeedHotkeys(items: NewsItem[]) {
 
       if (e.key === "j" || e.key === "ArrowDown") {
         e.preventDefault();
-        const next = Math.min(items.length - 1, focused + 1);
+        const next = focused < 0 ? 0 : Math.min(items.length - 1, focused + 1);
         setFocused(next);
         document.getElementById(`item-${items[next]?.id}`)?.scrollIntoView({
           block: "nearest",
         });
       } else if (e.key === "k" || e.key === "ArrowUp") {
         e.preventDefault();
-        const next = Math.max(0, focused - 1);
+        const next = focused < 0 ? 0 : Math.max(0, focused - 1);
         setFocused(next);
         document.getElementById(`item-${items[next]?.id}`)?.scrollIntoView({
           block: "nearest",
         });
       } else if (e.key === "Enter") {
-        const item = items[focused];
+        const item = focused >= 0 ? items[focused] : undefined;
         if (item) router.push(`/item/${item.id}`);
       } else if (e.key === "o") {
-        const item = items[focused];
+        const item = focused >= 0 ? items[focused] : undefined;
         if (item) window.open(item.sourceUrl, "_blank", "noopener,noreferrer");
       }
     }

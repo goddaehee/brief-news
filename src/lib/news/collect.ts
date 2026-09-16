@@ -1,4 +1,5 @@
 import { TOPIC_MAP } from "./topics";
+import { isSeedItem } from "./data";
 import {
   COLLECT_COOLDOWN_MS,
   COLLECT_MAX_NEW,
@@ -56,9 +57,11 @@ export async function collectOnce(): Promise<CollectResult> {
         continue;
       }
       if (
-        existing.some(
-          (i) => tooSimilar(i.title, e.title) || tooSimilar(i.originalTitle, e.title),
-        ) ||
+        existing
+          .filter((i) => !isSeedItem(i))
+          .some(
+            (i) => tooSimilar(i.title, e.title) || tooSimilar(i.originalTitle, e.title),
+          ) ||
         fresh.some((f) => tooSimilar(f.title, e.title))
       ) {
         skipped += 1;
@@ -70,6 +73,10 @@ export async function collectOnce(): Promise<CollectResult> {
 
     const classified = await Promise.all(fresh.map((entry) => classifyEntry(entry)));
     for (const payload of classified) {
+      if (payload.keep === false) {
+        skipped += 1;
+        continue;
+      }
       const ok = await insertItem(payload);
       if (ok) inserted += 1;
       else skipped += 1;
@@ -225,11 +232,11 @@ async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
           {
             role: "system",
             content:
-              "당신은 한국 AI 실무자용 뉴스 터미널의 편집기다. 단순 번역이 아니라 ‘그래서 실무자가 뭘 하면 되는지’를 한 줄로 적는다. 말투: 짧고 단호. ‘~필요’, ‘~고려’, ‘~주시’, ‘~시점’. JSON만 출력.",
+              "당신은 한국 AI 실무자용 뉴스 터미널의 편집기다. 단순 번역이 아니라 ‘그래서 실무자가 뭘 하면 되는지’를 한 줄로 적는다. 말투: 짧고 단호. 존댓말·번역투 금지. 헤드라인은 한국 테크 매체 문장(주어 먼저, 핵심 수치, 말줄임표 …). 시사점은 두 문장 이내, 마침표로 끊는다. 속보는 장애·당일 출시·즉시 가격 변경만. 대부분은 참고. JSON만 출력.",
           },
           {
             role: "user",
-            content: `원문 제목: ${entry.title}\n출처: ${entry.source}\n링크: ${entry.sourceUrl}\n발췌: ${entry.summary.slice(0, 600)}\n\nJSON 스키마:\n{"title":"한국어 헤드라인","takeaway":"한 줄 시사점","summary":"3~5문장 요약","grade":"breaking|important|note","tip":false,"topics":["openai"]}\ntopics 허용값: ${ALLOWED_TOPICS.join(", ")}`,
+            content: `원문 제목: ${entry.title}\n출처: ${entry.source}\n링크: ${entry.sourceUrl}\n발췌: ${entry.summary.slice(0, 600)}\n\nJSON 스키마:\n{"keep":true,"title":"한국어 헤드라인","takeaway":"한 줄 시사점","summary":"3~5문장 요약","grade":"breaking|important|note","tip":false,"topics":["openai"]}\nkeep=false 인 경우: 주식·공시·영상 라운드업·AI와 무관한 기사.\ntopics 허용값: ${ALLOWED_TOPICS.join(", ")}`,
           },
         ],
       }),
@@ -242,6 +249,9 @@ async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
     const text = body.choices?.[0]?.message?.content ?? "";
     const json = extractJson(text);
     if (!json) return fallbackPayload(entry);
+    if (json.keep === false) {
+      return { ...fallbackPayload(entry), keep: false };
+    }
     return {
       title: String(json.title || entry.title).slice(0, 180),
       takeaway: String(json.takeaway || entry.summary).slice(0, 220),
@@ -255,6 +265,7 @@ async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
         ? json.topics.filter((t) => typeof t === "string" && TOPIC_MAP[t]).slice(0, 4)
         : [],
       publishedAt: entry.date,
+      keep: true,
     };
   } catch {
     return fallbackPayload(entry);
@@ -357,12 +368,12 @@ function extractJson(text: string): Record<string, unknown> | null {
 }
 
 async function refreshBriefing() {
-  const items = await listNews();
-  const lines = items
-    .filter((i) => i.grade === "breaking" || i.grade === "important")
-    .slice(0, 6)
-    .map((i) => i.title);
-  if (lines.length) await upsertBriefing(lines);
+  const items = (await listNews()).filter((i) => !isSeedItem(i));
+  if (!items.length) return;
+  const pool = items.filter((i) => i.grade === "breaking" || i.grade === "important");
+  const rest = items.filter((i) => !pool.includes(i));
+  const lines = [...pool, ...rest].slice(0, 6).map((i) => i.title);
+  await upsertBriefing(lines);
 }
 
 export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted: number; skipped: number }> {

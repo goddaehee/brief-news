@@ -23,7 +23,18 @@ export async function generateMetadata({
   const { item } = await getItem(id);
   if (!item) return { title: "없는 소식" };
   const grade = item.grade === "breaking" ? "속보" : item.grade === "important" ? "중요" : "참고";
-  return { title: `[${grade}] ${item.title}`, description: item.takeaway };
+  const published = new Date(item.publishedAt).toISOString();
+  return {
+    title: `[${grade}] ${item.title}`,
+    description: item.takeaway,
+    openGraph: {
+      type: "article",
+      title: item.title,
+      description: item.takeaway,
+      publishedTime: published,
+      images: ["/og.jpg"],
+    },
+  };
 }
 
 export default async function ItemPage({ params }: { params: Promise<{ id: string }> }) {
@@ -35,9 +46,24 @@ export default async function ItemPage({ params }: { params: Promise<{ id: strin
   const latest = latestItems(item, all);
   const next = nextItem(item, all);
   const left = gradeColor(item.grade);
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "NewsArticle",
+    headline: item.title,
+    description: item.takeaway,
+    datePublished: new Date(item.publishedAt).toISOString(),
+    inLanguage: "ko",
+    url: `/item/${item.id}`,
+    author: { "@type": "Organization", name: "brief_" },
+    publisher: { "@type": "Organization", name: "brief_" },
+  };
 
   return (
     <main className="mx-auto max-w-2xl px-4 py-10 sm:py-16">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
       <div className="flex items-center justify-between gap-3">
         <Wordmark href="/" size="sm" muted withTag />
         <NotifyButton />

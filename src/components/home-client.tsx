@@ -38,7 +38,7 @@ export function HomeClient({ data }: { data: FeedPayload }) {
   return (
     <main>
       <div className="mx-auto max-w-4xl px-3 sm:px-6">
-        <SiteHeader lastUpdated={lastUpdated} />
+        <SiteHeader lastUpdated={lastUpdated} showCollect={!data.lastRunAt} />
         <FilterBar value={filter} counts={c} onChange={setFilter} />
         <TopicBar />
         <Ticker items={tickerItems(all)} />
@@ -57,7 +57,7 @@ export function HomeClient({ data }: { data: FeedPayload }) {
             <button
               type="button"
               onClick={loadMore}
-              className="rounded border border-line-strong px-5 py-2 font-mono-ts text-xs text-fg transition-colors hover:border-muted hover:text-white"
+              className="rounded border border-line-strong px-5 py-2 font-mono-ts text-xs text-fg transition-colors hover:border-muted hover:text-head"
             >
               더 보기 ↓
             </button>
