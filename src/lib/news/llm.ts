@@ -4,10 +4,12 @@
  * Priority:
  *   1. LLM_API_KEY  (+ optional LLM_BASE_URL / LLM_MODEL)
  *   2. XAI_API_KEY  → https://api.x.ai/v1  grok-4.5
- *   3. GLM_API_KEY or ZAI_API_KEY → https://api.z.ai/api/paas/v4  glm-4.5-flash
+ *   3. GLM_API_KEY or ZAI_API_KEY → https://api.z.ai/api/paas/v4  glm-5.3
  *
  * GLM 중국 엔드포인트는 LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
  * OpenRouter 등은 LLM_BASE_URL + LLM_MODEL 만 맞추면 된다.
+ *
+ * glm-5.x 는 thinking 을 끌 수 없다. reasoning_effort=low 로 수집 지연을 막는다.
  */
 
 export type LlmConfig = {
@@ -28,7 +30,7 @@ function providerFromBase(base: string): LlmConfig["provider"] {
 }
 
 function defaultModel(provider: LlmConfig["provider"]): string {
-  if (provider === "glm") return "glm-4.5-flash";
+  if (provider === "glm") return "glm-5.3";
   if (provider === "xai") return "grok-4.5";
   return "gpt-4.1-mini";
 }
@@ -67,12 +69,16 @@ export function resolveLlm(): LlmConfig | null {
     return {
       apiKey: glmKey,
       baseUrl: base,
-      model: modelOverride || "glm-4.5-flash",
+      model: modelOverride || "glm-5.3",
       provider: "glm",
     };
   }
 
   return null;
+}
+
+function isGlm5(model: string): boolean {
+  return /^glm-5/i.test(model);
 }
 
 export async function chatJson(args: {
@@ -93,7 +99,12 @@ export async function chatJson(args: {
     ],
   };
   if (cfg.provider === "glm") {
-    body.thinking = { type: "disabled" };
+    if (isGlm5(cfg.model)) {
+      body.thinking = { type: "enabled" };
+      body.reasoning_effort = "low";
+    } else {
+      body.thinking = { type: "disabled" };
+    }
   }
 
   try {
@@ -104,7 +115,7 @@ export async function chatJson(args: {
         Authorization: `Bearer ${cfg.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(25000),
     });
     if (!res.ok) return null;
     const json = (await res.json()) as {

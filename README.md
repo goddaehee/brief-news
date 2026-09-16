@@ -88,11 +88,11 @@ pnpm start        # 빌드 산출물
 | 키 | 어디서 | 용도 |
 |---|---|---|
 | `DATABASE_URL` | Supabase (권장) 또는 아무 Postgres | 글·브리핑·수집 로그. 없으면 메모리 시드(재시작·인스턴스마다 리셋) |
-| `GLM_API_KEY` 또는 `ZAI_API_KEY` | 서버만 | GLM으로 한국어 분류·요약. 기본 `https://api.z.ai/api/paas/v4` · `glm-4.5-flash` |
+| `GLM_API_KEY` 또는 `ZAI_API_KEY` | 서버만 | GLM으로 한국어 분류·요약. 기본 `https://api.z.ai/api/paas/v4` · `glm-5.3` |
 | `XAI_API_KEY` | 서버만 | xAI grok-4.5. GLM과 둘 다 있으면 `LLM_API_KEY` → xAI → GLM 순 |
 | `LLM_API_KEY` | 서버만 | OpenAI 호환 키. `LLM_BASE_URL` · `LLM_MODEL`과 같이 쓰면 제공자를 직접 고른다 |
 | `LLM_BASE_URL` | 선택 | 예: `https://open.bigmodel.cn/api/paas/v4`, `https://openrouter.ai/api/v1` |
-| `LLM_MODEL` | 선택 | 예: `glm-4.5-flash`, `grok-4.5` |
+| `LLM_MODEL` | 선택 | 예: `glm-5.3`, `grok-4.5` |
 | `COLLECT_SECRET` | 나중 | 크론 붙일 때. 없으면 `/api/collect` POST가 열려 있음 |
 
 페이지 로드마다 AI를 부르지 않는다. 수집 버튼·크론·입고 API만 호출한다. `GET /api/collect`는 상태 조회만 하고 수집하지 않는다.
