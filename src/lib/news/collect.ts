@@ -4,6 +4,7 @@ import {
   COLLECT_MAX_NEW,
   INGEST_MAX_BATCH,
   NEWS_SOURCES,
+  SOURCE_RANK,
 } from "./sources";
 import { decodeFeedBytes, parseFeedXml, parseNewsMarkdown } from "./parse";
 import {
@@ -22,7 +23,7 @@ const ALLOWED_TOPICS = Object.keys(TOPIC_MAP);
 const AI_HINT =
   /\b(ai|a\.i\.|llm|gpt-?\d*|chatgpt|claude|gemini|grok|openai|anthropic|xai|nvidia|hbm|gpu|agent|인공지능|생성형|챗봇|딥러닝|에이전트|언어\s*모델|파운데이션\s*모델)\b/i;
 const SKIP_HINT =
-  /장내매수|최대주주|액면병합|변경상장|유상증자|무상증자|주식\s*취득|임원\s*변동|거래정지|시간외|배당\s*공시/;
+  /장내매수|최대주주|액면병합|변경상장|유상증자|무상증자|주식\s*취득|임원\s*변동|거래정지|시간외|배당\s*공시|youtube|youtu\.be|노트북 후보|특징주|테마주|급등주|상한가|하한가|공시\b|거주 세계|자사주/i;
 
 export async function collectOnce(): Promise<CollectResult> {
   await ensureSeeded();
@@ -45,11 +46,21 @@ export async function collectOnce(): Promise<CollectResult> {
   let skipped = 0;
 
   try {
+    const existing = await listNews();
     const entries = await pullRss();
     fetched = entries.length;
-    const fresh = [];
+    const fresh: RawEntry[] = [];
     for (const e of entries) {
       if (await sourceUrlExists(e.sourceUrl)) {
+        skipped += 1;
+        continue;
+      }
+      if (
+        existing.some(
+          (i) => tooSimilar(i.title, e.title) || tooSimilar(i.originalTitle, e.title),
+        ) ||
+        fresh.some((f) => tooSimilar(f.title, e.title))
+      ) {
         skipped += 1;
         continue;
       }
@@ -155,8 +166,43 @@ async function pullRss(): Promise<RawEntry[]> {
   return results
     .flat()
     .filter(keepEntry)
-    .sort((a, b) => b.date - a.date)
+    .sort(byDeskPriority)
     .filter((e, i, arr) => arr.findIndex((x) => x.sourceUrl === e.sourceUrl) === i);
+}
+
+function hasHangul(s: string): boolean {
+  return /[\uAC00-\uD7A3]/.test(s);
+}
+
+function byDeskPriority(a: RawEntry, b: RawEntry): number {
+  const recency = (e: RawEntry) => (Date.now() - e.date < 6 * 60 * 60 * 1000 ? 1 : 0);
+  const ra = recency(a);
+  const rb = recency(b);
+  if (ra !== rb) return rb - ra;
+  const pa = SOURCE_RANK[a.source] ?? 1;
+  const pb = SOURCE_RANK[b.source] ?? 1;
+  if (pa !== pb) return pb - pa;
+  const ha = hasHangul(a.title) ? 1 : 0;
+  const hb = hasHangul(b.title) ? 1 : 0;
+  if (ha !== hb) return hb - ha;
+  return b.date - a.date;
+}
+
+function foldTitle(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/[^0-9a-z\uAC00-\uD7A3]+/gi, "")
+    .slice(0, 96);
+}
+
+function tooSimilar(a: string, b: string): boolean {
+  const fa = foldTitle(a);
+  const fb = foldTitle(b);
+  if (!fa || !fb) return false;
+  if (fa === fb) return true;
+  if (fa.length >= 12 && fb.length >= 12 && (fa.includes(fb) || fb.includes(fa))) return true;
+  return false;
 }
 
 async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
@@ -236,6 +282,19 @@ function guessTopics(text: string): string[] {
   const t = text.toLowerCase();
   const found: string[] = [];
   const rules: [string, string][] = [
+    ["kimi k3", "kimi-k3"],
+    ["kimi-k3", "kimi-k3"],
+    ["kimik3", "kimi-k3"],
+    ["kimi", "kimi-k3"],
+    ["opus 5", "opus-5"],
+    ["opus-5", "opus-5"],
+    ["opus5", "opus-5"],
+    ["bonsai 27", "bonsai-27b"],
+    ["bonsai-27", "bonsai-27b"],
+    ["bonsai", "bonsai-27b"],
+    ["claude code", "claude-code"],
+    ["claude-code", "claude-code"],
+    ["claudecode", "claude-code"],
     ["openai", "openai"],
     ["gpt", "openai"],
     ["anthropic", "anthropic"],
@@ -268,7 +327,10 @@ function guessTopics(text: string): string[] {
     ["타임스", "korea-ai"],
     ["zdnet", "korea-ai"],
     ["전자신문", "korea-ai"],
-    ["디지털투데이", "korea-ai"],
+    ["바이라인", "korea-ai"],
+    ["테크m", "korea-ai"],
+    ["디일렉", "korea-ai"],
+    ["인공지능신문", "korea-ai"],
     ["aitimes", "korea-ai"],
     ["etnews", "korea-ai"],
   ];

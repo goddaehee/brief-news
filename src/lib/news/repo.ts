@@ -1,10 +1,7 @@
 import { createHash } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
 import { getBriefingDate, getBriefingLines, getSeedItems } from "./data";
-import { parseNewsMarkdown } from "./parse";
 import type { Grade, IngestPayload, IngestRun, NewsItem } from "./types";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 
 const SCHEMA = `
 create table if not exists news_items (
@@ -142,44 +139,9 @@ export async function ensureSeeded(): Promise<void> {
   return seedPromise;
 }
 
-async function ingestBundledMarkdown() {
-  try {
-    const raw = await readFile(join(process.cwd(), "content/news/_example.md"), "utf8");
-    await insertItem(parseNewsMarkdown(raw));
-  } catch {
-    /* bundled file missing on some hosts */
-  }
-}
-
 async function seedIfEmpty() {
   await ensureSchema();
   if (hasDatabaseUrl()) {
-    const sql = getNeon();
-    const count = await sql(`select count(*)::int as n from news_items`);
-    if (Number(count[0]?.n ?? 0) > 0) return;
-    const now = Date.now();
-    for (const item of getSeedItems(now)) {
-      await insertItem({
-        id: item.id,
-        title: item.title,
-        takeaway: item.takeaway,
-        summary: item.summary,
-        source: item.source,
-        sourceUrl: item.sourceUrl,
-        originalTitle: item.originalTitle,
-        grade: item.grade,
-        tip: item.tip,
-        topics: item.topics,
-        publishedAt: item.publishedAt,
-      });
-    }
-    await ingestBundledMarkdown();
-    await upsertBriefing(getBriefingLines());
-    await sql(
-      `insert into ingest_runs (started_at, finished_at, status, fetched, inserted, skipped, note)
-       values (now(), now(), 'seed', 0, $1, 0, 'seed corpus + markdown')`,
-      [getSeedItems(now).length],
-    );
     return;
   }
 
@@ -190,13 +152,6 @@ async function seedIfEmpty() {
     m.items.set(item.id, item);
     m.urls.add(item.sourceUrl);
   }
-  try {
-    const raw = await readFile(join(process.cwd(), "content/news/_example.md"), "utf8");
-    const payload = parseNewsMarkdown(raw);
-    await insertItem(payload);
-  } catch {
-    /* skip */
-  }
   m.briefings.set(getBriefingDate(), getBriefingLines());
   m.runs.unshift({
     id: m.runSeq++,
@@ -205,7 +160,7 @@ async function seedIfEmpty() {
     fetched: 0,
     inserted: m.items.size,
     skipped: 0,
-    note: "seed corpus + markdown",
+    note: "preview seed corpus",
   });
   m.seeded = true;
 }
@@ -266,14 +221,14 @@ export async function insertItem(payload: IngestPayload): Promise<boolean> {
       [
         id,
         new Date(publishedAt).toISOString(),
-        payload.grade ?? "note",
-        payload.tip ?? false,
+        payload.grade,
+        payload.tip,
         payload.title,
         payload.takeaway,
         payload.summary,
         payload.source,
         payload.sourceUrl,
-        payload.originalTitle || payload.title,
+        payload.originalTitle,
         JSON.stringify(topics),
       ],
     );
@@ -284,14 +239,14 @@ export async function insertItem(payload: IngestPayload): Promise<boolean> {
   const item: NewsItem = {
     id,
     publishedAt,
-    grade: payload.grade ?? "note",
-    tip: payload.tip ?? false,
+    grade: payload.grade,
+    tip: payload.tip,
     title: payload.title,
     takeaway: payload.takeaway,
     summary: payload.summary,
     source: payload.source,
     sourceUrl: payload.sourceUrl,
-    originalTitle: payload.originalTitle || payload.title,
+    originalTitle: payload.originalTitle,
     topics,
   };
   m.items.set(id, item);
@@ -299,79 +254,43 @@ export async function insertItem(payload: IngestPayload): Promise<boolean> {
   return true;
 }
 
-export async function getBriefing(): Promise<{ date: string; lines: string[] }> {
-  const date = getBriefingDate();
-  if (hasDatabaseUrl()) {
-    const sql = getNeon();
-    const rows = await sql(`select lines from briefings where briefing_date = $1`, [date]);
-    if (rows[0]) {
-      try {
-        const lines = JSON.parse(String(rows[0].lines));
-        if (Array.isArray(lines) && lines.length) {
-          return { date, lines: lines.filter((x) => typeof x === "string") };
-        }
-      } catch {
-        /* fall through */
-      }
-    }
-    return { date, lines: getBriefingLines() };
-  }
-  return { date, lines: mem().briefings.get(date) ?? getBriefingLines() };
-}
-
 export async function upsertBriefing(lines: string[], date = getBriefingDate()) {
   if (hasDatabaseUrl()) {
     const sql = getNeon();
     await sql(
       `insert into briefings (briefing_date, lines, updated_at)
-       values ($1, $2, now())
+       values ($1,$2,now())
        on conflict (briefing_date) do update set lines = excluded.lines, updated_at = now()`,
-      [date, JSON.stringify(lines.slice(0, 8))],
+      [date, JSON.stringify(lines)],
     );
     return;
   }
-  mem().briefings.set(date, lines.slice(0, 8));
+  mem().briefings.set(date, lines);
 }
 
-export async function lastRunAt(): Promise<number | null> {
+export async function getBriefing(): Promise<{ date: string; lines: string[] }> {
+  const date = getBriefingDate();
   if (hasDatabaseUrl()) {
     const sql = getNeon();
-    const rows = await sql(
-      `select (extract(epoch from started_at) * 1000)::bigint as ms
-         from ingest_runs where status <> 'seed' order by started_at desc limit 1`,
-    );
-    return rows[0] ? Number(rows[0].ms) : null;
+    const rows = await sql(`select lines from briefings where briefing_date = $1`, [date]);
+    if (!rows[0]) return { date, lines: [] };
+    try {
+      const parsed = JSON.parse(String(rows[0].lines));
+      return { date, lines: Array.isArray(parsed) ? parsed.map(String) : [] };
+    } catch {
+      return { date, lines: [] };
+    }
   }
-  const run = mem().runs.find((r) => r.status !== "seed");
-  return run?.startedAt ?? null;
-}
-
-export async function listRuns(): Promise<IngestRun[]> {
-  if (hasDatabaseUrl()) {
-    const sql = getNeon();
-    const rows = await sql(
-      `select id, (extract(epoch from started_at) * 1000)::bigint as started_ms,
-              status, fetched, inserted, skipped, coalesce(note, '') as note
-         from ingest_runs order by started_at desc limit 24`,
-    );
-    return rows.map((r) => ({
-      id: Number(r.id),
-      startedAt: Number(r.started_ms),
-      status: String(r.status),
-      fetched: Number(r.fetched),
-      inserted: Number(r.inserted),
-      skipped: Number(r.skipped),
-      note: String(r.note),
-    }));
-  }
-  return mem().runs.slice(0, 24);
+  return { date, lines: mem().briefings.get(date) ?? [] };
 }
 
 export async function beginRun(): Promise<number> {
   if (hasDatabaseUrl()) {
     const sql = getNeon();
-    const rows = await sql(`insert into ingest_runs (status) values ('running') returning id`);
-    return Number(rows[0]?.id ?? 0);
+    const rows = await sql(
+      `insert into ingest_runs (status) values ('running') returning id`,
+    );
+    return Number(rows[0]?.id);
   }
   const m = mem();
   const id = m.runSeq++;
@@ -382,25 +301,68 @@ export async function beginRun(): Promise<number> {
     fetched: 0,
     inserted: 0,
     skipped: 0,
-    note: "",
   });
   return id;
 }
 
 export async function finishRun(
   id: number,
-  data: { status: string; fetched: number; inserted: number; skipped: number; note: string },
+  info: { status: string; fetched: number; inserted: number; skipped: number; note?: string },
 ) {
   if (hasDatabaseUrl()) {
     const sql = getNeon();
     await sql(
-      `update ingest_runs
-          set finished_at = now(), status = $2, fetched = $3, inserted = $4, skipped = $5, note = $6
-        where id = $1`,
-      [id, data.status, data.fetched, data.inserted, data.skipped, data.note],
+      `update ingest_runs set finished_at = now(), status = $2, fetched = $3, inserted = $4, skipped = $5, note = $6 where id = $1`,
+      [id, info.status, info.fetched, info.inserted, info.skipped, info.note ?? null],
     );
     return;
   }
   const run = mem().runs.find((r) => r.id === id);
-  if (run) Object.assign(run, data);
+  if (run) {
+    run.finishedAt = Date.now();
+    run.status = info.status;
+    run.fetched = info.fetched;
+    run.inserted = info.inserted;
+    run.skipped = info.skipped;
+    run.note = info.note;
+  }
+}
+
+export async function listRuns(limit = 12): Promise<IngestRun[]> {
+  if (hasDatabaseUrl()) {
+    const sql = getNeon();
+    const rows = await sql(
+      `select id, (extract(epoch from started_at) * 1000)::bigint as started_ms,
+              (extract(epoch from finished_at) * 1000)::bigint as finished_ms,
+              status, fetched, inserted, skipped, note
+         from ingest_runs order by id desc limit $1`,
+      [limit],
+    );
+    return rows.map((row) => ({
+      id: Number(row.id),
+      startedAt: Number(row.started_ms),
+      finishedAt: row.finished_ms == null ? undefined : Number(row.finished_ms),
+      status: String(row.status),
+      fetched: Number(row.fetched),
+      inserted: Number(row.inserted),
+      skipped: Number(row.skipped),
+      note: row.note == null ? undefined : String(row.note),
+    }));
+  }
+  return mem().runs.slice(0, limit);
+}
+
+export async function lastRunAt(): Promise<number | null> {
+  if (hasDatabaseUrl()) {
+    const sql = getNeon();
+    const rows = await sql(
+      `select (extract(epoch from finished_at) * 1000)::bigint as ms
+         from ingest_runs
+        where status <> 'seed' and finished_at is not null
+        order by finished_at desc limit 1`,
+    );
+    return rows[0]?.ms == null ? null : Number(rows[0].ms);
+  }
+  const run = mem().runs.find((r) => r.status !== "seed" && r.finishedAt);
+  return run?.finishedAt ?? null;
 }

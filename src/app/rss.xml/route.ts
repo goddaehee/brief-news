@@ -13,6 +13,21 @@ function xml(value: string): string {
   return value.replace(/&/g, AMP).replace(/</g, LT).replace(/>/g, GT).replace(/"/g, QUOT);
 }
 
+function publicOrigin(request: Request): string {
+  const xfHost = request.headers.get("x-forwarded-host");
+  const host = (xfHost || request.headers.get("host") || "").split(",")[0].trim();
+  const proto = request.headers.get("x-forwarded-proto") || "http";
+  if (host && !host.startsWith("0.0.0.0") && !host.startsWith("[::]")) {
+    const safe = host.replace(/^127\.0\.0\.1/, "localhost");
+    return `${proto}://${safe}`;
+  }
+  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+    return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+  }
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  return "http://localhost:8080";
+}
+
 function buildRss(origin: string, items: NewsItem[]): string {
   const latest = items[0]?.publishedAt ?? Date.now();
   const entries = items
@@ -49,7 +64,7 @@ ${entries}
 export async function GET(request: Request) {
   await ensureSeeded();
   const items = await listNews();
-  const origin = new URL(request.url).origin;
+  const origin = publicOrigin(request);
   return new Response(buildRss(origin, items.slice(0, 40)), {
     headers: {
       "Content-Type": "application/rss+xml; charset=utf-8",

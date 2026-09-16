@@ -31,9 +31,9 @@ export type IngestPayload = {
   source: string;
   sourceUrl: string;
   originalTitle: string;
-  grade?: Grade;
-  tip?: boolean;
-  topics?: string[];
+  grade: Grade;
+  tip: boolean;
+  topics: string[];
   publishedAt?: number;
 };
 
@@ -50,11 +50,12 @@ export type CollectResult = {
 export type IngestRun = {
   id: number;
   startedAt: number;
+  finishedAt?: number;
   status: string;
   fetched: number;
   inserted: number;
   skipped: number;
-  note: string;
+  note?: string;
 };
 
 export type FeedPayload = {
