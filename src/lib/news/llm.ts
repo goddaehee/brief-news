@@ -90,7 +90,7 @@ export async function chatJson(args: {
 
   const body: Record<string, unknown> = {
     model: cfg.model,
-    max_tokens: 420,
+    max_tokens: 700,
     temperature: 0.2,
     response_format: { type: "json_object" },
     messages: [

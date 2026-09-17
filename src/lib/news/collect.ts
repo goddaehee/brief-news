@@ -1,6 +1,6 @@
-import { TOPIC_MAP } from "./topics";
 import { isSeedItem } from "./data";
 import { chatJson, resolveLlm } from "./llm";
+import { deskUser, DESK_SYSTEM, polishPayload, shouldDrop } from "./desk";
 import {
   COLLECT_COOLDOWN_MS,
   COLLECT_MAX_NEW,
@@ -21,13 +21,12 @@ import {
   tryCollectLock,
   upsertBriefing,
 } from "./repo";
-import type { CollectResult, Grade, IngestPayload } from "./types";
+import type { CollectResult, IngestPayload } from "./types";
 
-const ALLOWED_TOPICS = Object.keys(TOPIC_MAP);
 const AI_HINT =
   /\b(ai|a\.i\.|llm|gpt-?\d*|chatgpt|claude|gemini|grok|openai|anthropic|xai|nvidia|hbm|gpu|agent|인공지능|생성형|챗봇|딥러닝|에이전트|언어\s*모델|파운데이션\s*모델)\b/i;
 const SKIP_HINT =
-  /장내매수|최대주주|액면병합|변경상장|유상증자|무상증자|주식\s*취득|임원\s*변동|거래정지|시간외|배당\s*공시|youtube|youtu\.be|노트북 후보|특징주|테마주|급등주|상한가|하한가|공시\b|거주 세계|자사주/i;
+  /장내매수|최대주주|액면병합|변경상장|유상증자|무상증자|주식\s*취득|임원\s*변동|거래정지|시간외|배당\s*공시|youtube|youtu\.be|노트북 후보|특징주|테마주|급등주|상한가|하한가|공시\b|거주 세계|자사주|만찬|국빈|시상식|포토\s*뉴스|오늘의 인물/i;
 
 function lockOwner(): string {
   return `brief-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -238,33 +237,25 @@ function tooSimilar(a: string, b: string): boolean {
 }
 
 async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
+  if (shouldDrop(entry.title, entry.summary)) {
+    return { ...fallbackPayload(entry), keep: false };
+  }
   if (!resolveLlm()) return fallbackPayload(entry);
 
   const json = await chatJson({
-    system:
-      "당신은 한국 AI 실무자용 뉴스 터미널의 편집기다. 단순 번역이 아니라 ‘그래서 실무자가 뭘 하면 되는지’를 한 줄로 적는다. 말투: 짧고 단호. 존댓말·번역투 금지. 헤드라인은 한국 테크 매체 문장(주어 먼저, 핵심 수치, 말줄임표 …). 시사점은 두 문장 이내, 마침표로 끊는다. 속보는 장애·당일 출시·즉시 가격 변경만. 대부분은 참고. JSON만 출력.",
-    user: `원문 제목: ${entry.title}\n출처: ${entry.source}\n링크: ${entry.sourceUrl}\n발췌: ${entry.summary.slice(0, 600)}\n\nJSON 스키마:\n{"keep":true,"title":"한국어 헤드라인","takeaway":"한 줄 시사점","summary":"3~5문장 요약","grade":"breaking|important|note","tip":false,"topics":["openai"]}\nkeep=false 인 경우: 주식·공시·영상 라운드업·AI와 무관한 기사.\ntopics 허용값: ${ALLOWED_TOPICS.join(", ")}`,
+    system: DESK_SYSTEM,
+    user: deskUser(entry),
   });
 
   if (!json) return fallbackPayload(entry);
   if (json.keep === false) {
     return { ...fallbackPayload(entry), keep: false };
   }
-  return {
-    title: String(json.title || entry.title).slice(0, 180),
-    takeaway: String(json.takeaway || entry.summary).slice(0, 220),
-    summary: String(json.summary || entry.summary).slice(0, 1200),
-    source: entry.source,
-    sourceUrl: entry.sourceUrl,
-    originalTitle: entry.title,
-    grade: asGrade(json.grade),
-    tip: Boolean(json.tip),
-    topics: Array.isArray(json.topics)
-      ? json.topics.filter((t) => typeof t === "string" && TOPIC_MAP[t]).slice(0, 4)
-      : [],
-    publishedAt: entry.date,
-    keep: true,
-  };
+  const payload = polishPayload(json, entry);
+  if (shouldDrop(payload.title, payload.summary)) {
+    return { ...payload, keep: false };
+  }
+  return payload;
 }
 
 function fallbackPayload(entry: RawEntry): IngestPayload {
@@ -345,10 +336,6 @@ function guessTopics(text: string): string[] {
     if (found.length >= 3) break;
   }
   return found;
-}
-
-function asGrade(v: unknown): Grade {
-  return v === "breaking" || v === "important" || v === "note" ? v : "note";
 }
 
 async function refreshBriefing() {

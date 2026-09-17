@@ -662,16 +662,10 @@ export function isSeedItem(item: Pick<NewsItem, "id">): boolean {
 }
 
 /** Once real RSS rows exist, lead with them. Demo corpus fills out 어제. */
-export function publicFeedItems(items: NewsItem[], now = Date.now()): NewsItem[] {
+export function publicFeedItems(items: NewsItem[]): NewsItem[] {
   const real = items.filter((i) => !isSeedItem(i)).sort((a, b) => b.publishedAt - a.publishedAt);
-  if (real.length < 3) return items;
-  const seed = items
-    .filter((i) => isSeedItem(i))
-    .map((item, idx) => ({
-      ...item,
-      publishedAt: now - (26 * 60 * 60 * 1000 + idx * 90 * 60 * 1000),
-    }));
-  return [...real, ...seed];
+  if (real.length) return real;
+  return items;
 }
 
 export function realFeedItems(items: NewsItem[]): NewsItem[] {
