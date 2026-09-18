@@ -105,4 +105,5 @@ export const SOURCE_RANK: Record<string, number> = Object.fromEntries(
 
 export const COLLECT_COOLDOWN_MS = 10 * 60 * 1000;
 export const COLLECT_MAX_NEW = 6;
+export const COLLECT_REWRITE_MAX = 3;
 export const INGEST_MAX_BATCH = 10;

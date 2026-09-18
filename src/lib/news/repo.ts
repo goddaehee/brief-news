@@ -316,6 +316,59 @@ export async function insertItem(payload: IngestPayload): Promise<boolean> {
   return true;
 }
 
+export async function updateItem(id: string, payload: IngestPayload): Promise<boolean> {
+  const topics = payload.topics ?? [];
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    const rows = await sql(
+      `update news_items set
+          grade = $2, tip = $3, title = $4, takeaway = $5, summary = $6,
+          original_title = $7, topics = $8
+        where id = $1
+        returning id`,
+      [
+        id,
+        payload.grade,
+        payload.tip,
+        payload.title,
+        payload.takeaway,
+        payload.summary,
+        payload.originalTitle,
+        JSON.stringify(topics),
+      ],
+    );
+    return rows.length > 0;
+  }
+  const m = mem();
+  const prev = m.items.get(id);
+  if (!prev) return false;
+  m.items.set(id, {
+    ...prev,
+    grade: payload.grade,
+    tip: payload.tip,
+    title: payload.title,
+    takeaway: payload.takeaway,
+    summary: payload.summary,
+    originalTitle: payload.originalTitle,
+    topics,
+  });
+  return true;
+}
+
+export async function deleteItem(id: string): Promise<boolean> {
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    const rows = await sql(`delete from news_items where id = $1 returning source_url`, [id]);
+    return rows.length > 0;
+  }
+  const m = mem();
+  const prev = m.items.get(id);
+  if (!prev) return false;
+  m.items.delete(id);
+  m.urls.delete(prev.sourceUrl);
+  return true;
+}
+
 export async function upsertBriefing(lines: string[], date = getBriefingDate()) {
   if (hasDatabaseUrl()) {
     const sql = getSql();

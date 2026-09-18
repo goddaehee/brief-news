@@ -1,9 +1,10 @@
 import { isSeedItem } from "./data";
 import { chatJson, resolveLlm } from "./llm";
-import { deskUser, DESK_SYSTEM, polishPayload, shouldDrop } from "./desk";
+import { deskUser, DESK_SYSTEM, needsRewrite, polishPayload, shouldDrop } from "./desk";
 import {
   COLLECT_COOLDOWN_MS,
   COLLECT_MAX_NEW,
+  COLLECT_REWRITE_MAX,
   INGEST_MAX_BATCH,
   NEWS_SOURCES,
   SOURCE_RANK,
@@ -11,6 +12,7 @@ import {
 import { decodeFeedBytes, parseFeedXml, parseNewsMarkdown } from "./parse";
 import {
   beginRun,
+  deleteItem,
   ensureSeeded,
   finishRun,
   insertItem,
@@ -19,6 +21,7 @@ import {
   releaseCollectLock,
   sourceUrlExists,
   tryCollectLock,
+  updateItem,
   upsertBriefing,
 } from "./repo";
 import type { CollectResult, IngestPayload } from "./types";
@@ -69,9 +72,11 @@ export async function collectOnce(): Promise<CollectResult> {
 
     try {
       const existing = await listNews();
+      const rewritten = await rewriteStale(existing);
       const entries = await pullRss();
       fetched = entries.length;
       const fresh: RawEntry[] = [];
+      const newCap = rewritten > 0 ? Math.min(3, COLLECT_MAX_NEW) : COLLECT_MAX_NEW;
       for (const e of entries) {
         if (await sourceUrlExists(e.sourceUrl)) {
           skipped += 1;
@@ -89,7 +94,7 @@ export async function collectOnce(): Promise<CollectResult> {
           continue;
         }
         fresh.push(e);
-        if (fresh.length >= COLLECT_MAX_NEW) break;
+        if (fresh.length >= newCap) break;
       }
 
       const classified = await Promise.all(fresh.map((entry) => classifyEntry(entry)));
@@ -103,11 +108,11 @@ export async function collectOnce(): Promise<CollectResult> {
         else skipped += 1;
       }
 
-      if (inserted > 0) await refreshBriefing();
+      if (inserted > 0 || rewritten > 0) await refreshBriefing();
 
       const note =
-        inserted > 0
-          ? `RSS ${fetched}건 중 ${inserted}건 편성${resolveLlm() ? "" : " · LLM 키 없음(원문 폴백)"}`
+        inserted > 0 || rewritten > 0
+          ? `RSS ${fetched}건 중 ${inserted}건 편성${rewritten ? ` · ${rewritten}건 재작성` : ""}${resolveLlm() ? "" : " · LLM 키 없음(원문 폴백)"}`
           : fetched === 0
             ? "RSS를 가져오지 못했습니다. 네트워크 또는 피드 주소를 확인하세요."
             : "새 소식이 없거나 모두 중복입니다.";
@@ -234,6 +239,32 @@ function tooSimilar(a: string, b: string): boolean {
   if (fa === fb) return true;
   if (fa.length >= 12 && fb.length >= 12 && (fa.includes(fb) || fb.includes(fa))) return true;
   return false;
+}
+
+async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>): Promise<number> {
+  if (!resolveLlm()) return 0;
+  const stale = existing.filter((i) => !isSeedItem(i) && needsRewrite(i)).slice(0, COLLECT_REWRITE_MAX);
+  let n = 0;
+  for (const item of stale) {
+    if (shouldDrop(item.title, item.summary) || shouldDrop(item.originalTitle, item.summary)) {
+      if (await deleteItem(item.id)) n += 1;
+      continue;
+    }
+    const payload = await classifyEntry({
+      title: item.originalTitle || item.title,
+      sourceUrl: item.sourceUrl,
+      source: item.source,
+      date: item.publishedAt,
+      summary: item.summary,
+    });
+    if (payload.keep === false) {
+      if (await deleteItem(item.id)) n += 1;
+      continue;
+    }
+    payload.publishedAt = item.publishedAt;
+    if (await updateItem(item.id, payload)) n += 1;
+  }
+  return n;
 }
 
 async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
