@@ -172,6 +172,13 @@ function keepEntry(e: RawEntry): boolean {
   return AI_HINT.test(target);
 }
 
+/** Nitter status URLs -> canonical x.com URLs (Nitter instances are flaky). */
+function rewriteNitterUrl(url: string): string {
+  const m = url.match(/^https?:\/\/[^/]+\/([^/?#]+)\/status\/(\d+)/);
+  if (m) return `https://x.com/${m[1]}/status/${m[2]}`;
+  return url;
+}
+
 async function pullRss(): Promise<RawEntry[]> {
   const results = await Promise.all(
     NEWS_SOURCES.map(async (src) => {
@@ -188,7 +195,7 @@ async function pullRss(): Promise<RawEntry[]> {
         const xml = decodeFeedBytes(buf, res.headers.get("content-type") ?? "");
         return parseFeedXml(xml, src.name).map((e) => ({
           title: e.title,
-          sourceUrl: e.link,
+          sourceUrl: src.id.startsWith("x-") ? rewriteNitterUrl(e.link) : e.link,
           source: src.name,
           date: e.date,
           summary: e.summary,

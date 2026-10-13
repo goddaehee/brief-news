@@ -89,6 +89,14 @@ export const NEWS_SOURCES: NewsSource[] = [
     rank: 7,
   },
   { id: "simonw", name: "Simon Willison", rss: "https://simonwillison.net/atom/everything/", rank: 6 },
+  // X (Twitter) via Nitter RSS bridge. Experimental — instances are flaky.
+  // Primary: nitter.meowing.monster / Fallback: nitter.kareem.one
+  // Links are rewritten to x.com in pullRss (rewriteNitterUrl).
+  { id: "x-openai", name: "X @OpenAI", rss: "https://nitter.meowing.monster/OpenAI/rss", rank: 6 },
+  { id: "x-anthropic", name: "X @AnthropicAI", rss: "https://nitter.meowing.monster/AnthropicAI/rss", rank: 6 },
+  { id: "x-xai", name: "X @xai", rss: "https://nitter.meowing.monster/xai/rss", rank: 6 },
+  { id: "x-deepmind", name: "X @GoogleDeepMind", rss: "https://nitter.meowing.monster/GoogleDeepMind/rss", rank: 6 },
+  { id: "x-rundown", name: "X @rowancheung", rss: "https://nitter.meowing.monster/rowancheung/rss", rank: 5 },
   // Reddit (.rss) returns 403 for server IPs — disabled until a bridge is set up.
   // { id: "localllama", name: "r/LocalLLaMA", rss: "https://www.reddit.com/r/LocalLLaMA/.rss", rank: 3 },
   // { id: "claudeai", name: "r/ClaudeAI", rss: "https://www.reddit.com/r/ClaudeAI/.rss", rank: 3 },
