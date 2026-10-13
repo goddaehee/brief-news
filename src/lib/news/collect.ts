@@ -238,6 +238,18 @@ function tooSimilar(a: string, b: string): boolean {
   if (!fa || !fb) return false;
   if (fa === fb) return true;
   if (fa.length >= 12 && fb.length >= 12 && (fa.includes(fb) || fb.includes(fa))) return true;
+  // 같은 사건을 다르게 쓴 제목: 핵심 토큰 겹침으로 잡는다.
+  const ta = new Set(
+    a.toLowerCase().replace(/[^0-9a-z\uAC00-\uD7A3]+/gi, " ").split(" ").filter((t) => t.length >= 2),
+  );
+  const tb = new Set(
+    b.toLowerCase().replace(/[^0-9a-z\uAC00-\uD7A3]+/gi, " ").split(" ").filter((t) => t.length >= 2),
+  );
+  if (ta.size >= 4 && tb.size >= 4) {
+    let inter = 0;
+    for (const t of ta) if (tb.has(t)) inter += 1;
+    if (inter >= 4 && inter / Math.min(ta.size, tb.size) >= 0.7) return true;
+  }
   return false;
 }
 

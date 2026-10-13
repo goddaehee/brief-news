@@ -139,8 +139,8 @@ function mapRow(row: Record<string, unknown>): NewsItem {
     topics = [];
   }
   const published =
-    typeof row.published_ms === "number"
-      ? row.published_ms
+    row.published_ms != null
+      ? Number(row.published_ms)
       : row.published_at
         ? new Date(String(row.published_at)).getTime()
         : Date.now();

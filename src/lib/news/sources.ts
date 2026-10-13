@@ -10,7 +10,7 @@ export type NewsSource = {
 
 /** Public RSS endpoints the collector pulls. The same list is what a cron hits. */
 export const NEWS_SOURCES: NewsSource[] = [
-  { id: "hn", name: "Hacker News", rss: "https://hnrss.org/newest?q=AI+OR+LLM+OR+GPT", rank: 4 },
+  { id: "hn", name: "Hacker News", rss: "https://hnrss.org/newest?q=AI+OR+LLM+OR+GPT", rank: 7 },
   { id: "geeknews", name: "GeekNews", rss: "https://news.hada.io/rss", rank: 8 },
   { id: "aitimes", name: "AI타임스", rss: "https://www.aitimes.com/rss/allArticle.xml", rank: 10 },
   {
@@ -52,21 +52,21 @@ export const NEWS_SOURCES: NewsSource[] = [
     id: "techcrunch",
     name: "TechCrunch",
     rss: "https://techcrunch.com/category/artificial-intelligence/feed/",
-    rank: 6,
+    rank: 7,
   },
   {
     id: "verge",
     name: "The Verge",
     rss: "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
-    rank: 6,
+    rank: 7,
   },
   {
     id: "ars",
     name: "Ars Technica",
     rss: "https://feeds.arstechnica.com/arstechnica/technology-lab",
-    rank: 5,
+    rank: 6,
   },
-  { id: "wired", name: "WIRED", rss: "https://www.wired.com/feed/tag/ai/latest/rss", rank: 6 },
+  { id: "wired", name: "WIRED", rss: "https://www.wired.com/feed/tag/ai/latest/rss", rank: 7 },
   { id: "openai", name: "OpenAI", rss: "https://openai.com/news/rss.xml", rank: 8 },
   { id: "google-ai", name: "Google AI", rss: "https://blog.google/technology/ai/rss/", rank: 8 },
   {
@@ -75,7 +75,7 @@ export const NEWS_SOURCES: NewsSource[] = [
     rss: "https://deepmind.google/blog/rss.xml",
     rank: 8,
   },
-  { id: "huggingface", name: "Hugging Face", rss: "https://huggingface.co/blog/feed.xml", rank: 5 },
+  { id: "huggingface", name: "Hugging Face", rss: "https://huggingface.co/blog/feed.xml", rank: 6 },
   {
     id: "nvidia",
     name: "NVIDIA",
@@ -86,17 +86,13 @@ export const NEWS_SOURCES: NewsSource[] = [
     id: "mittr",
     name: "MIT Tech Review",
     rss: "https://www.technologyreview.com/topic/artificial-intelligence/feed/",
-    rank: 6,
+    rank: 7,
   },
-  { id: "simonw", name: "Simon Willison", rss: "https://simonwillison.net/atom.xml", rank: 4 },
-  { id: "localllama", name: "r/LocalLLaMA", rss: "https://www.reddit.com/r/LocalLLaMA/.rss", rank: 3 },
-  { id: "claudeai", name: "r/ClaudeAI", rss: "https://www.reddit.com/r/ClaudeAI/.rss", rank: 3 },
-  {
-    id: "mlreddit",
-    name: "r/MachineLearning",
-    rss: "https://www.reddit.com/r/MachineLearning/.rss",
-    rank: 2,
-  },
+  { id: "simonw", name: "Simon Willison", rss: "https://simonwillison.net/atom/everything/", rank: 6 },
+  // Reddit (.rss) returns 403 for server IPs — disabled until a bridge is set up.
+  // { id: "localllama", name: "r/LocalLLaMA", rss: "https://www.reddit.com/r/LocalLLaMA/.rss", rank: 3 },
+  // { id: "claudeai", name: "r/ClaudeAI", rss: "https://www.reddit.com/r/ClaudeAI/.rss", rank: 3 },
+  // { id: "mlreddit", name: "r/MachineLearning", rss: "https://www.reddit.com/r/MachineLearning/.rss", rank: 2 },
 ];
 
 export const SOURCE_RANK: Record<string, number> = Object.fromEntries(
