@@ -12,7 +12,7 @@ import { TOPIC_MAP } from "@/lib/news/topics";
 import { formatKstLong } from "@/lib/news/time";
 import type { Grade, NewsItem } from "@/lib/news/types";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 60;
 
 export async function generateMetadata({
   params,

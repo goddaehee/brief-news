@@ -61,11 +61,13 @@ const g = globalThis as typeof globalThis & {
   __briefPg__?: ReturnType<typeof postgres>;
 };
 
+const QUERY_TIMEOUT_MS = 15000;
+
 function getSql(): SqlFn {
   if (!g.__briefPg__) {
     const url = process.env.DATABASE_URL!.trim();
     g.__briefPg__ = postgres(url, {
-      max: 1,
+      max: 3,
       idle_timeout: 20,
       connect_timeout: 10,
       prepare: false,
@@ -75,8 +77,29 @@ function getSql(): SqlFn {
   }
   const client = g.__briefPg__;
   return async (query, params = []) => {
-    const rows = await client.unsafe(query, params as postgres.ParameterOrJSON<never>[]);
-    return rows as unknown as Record<string, unknown>[];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const rows = await Promise.race([
+        client.unsafe(query, params as postgres.ParameterOrJSON<never>[]),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            // Drop the pooled client: a query that never settles means the
+            // underlying connection is wedged. Discard the pool so the next
+            // call reconnects instead of queueing behind the dead connection.
+            g.__briefPg__ = undefined;
+            try {
+              void client.end({ timeout: 1 });
+            } catch {
+              /* ignore */
+            }
+            reject(new Error(`db query timed out after ${QUERY_TIMEOUT_MS}ms`));
+          }, QUERY_TIMEOUT_MS);
+        }),
+      ]);
+      return rows as unknown as Record<string, unknown>[];
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   };
 }
 
