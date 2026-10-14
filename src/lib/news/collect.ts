@@ -82,8 +82,20 @@ export async function collectOnce(): Promise<CollectResult> {
       // DB 쿼리 대신 메모리의 existing Set으로 중복 체크 (순차 DB 왕복 제거)
       const existingUrls = new Set(existing.filter((i) => !isSeedItem(i)).map((i) => i.sourceUrl));
       const existingItems = existing.filter((i) => !isSeedItem(i));
+      // 소스별 하드캡: 단일 소스 최대 6건 (풍선 효과 방지 — ZDNet 잡으니 인공지능신문이 올라옴)
+      const SOURCE_CAP = 6;
+      const sourceCounts = new Map<string, number>();
+      for (const item of existingItems) {
+        sourceCounts.set(item.source, (sourceCounts.get(item.source) ?? 0) + 1);
+      }
       for (const e of entries) {
         if (existingUrls.has(e.sourceUrl)) {
+          skipped += 1;
+          continue;
+        }
+        // 소스별 캡 체크: 이미 6건 이상인 소스는 스킵
+        const sourceCount = sourceCounts.get(e.source) ?? 0;
+        if (sourceCount >= SOURCE_CAP) {
           skipped += 1;
           continue;
         }
@@ -98,6 +110,7 @@ export async function collectOnce(): Promise<CollectResult> {
         }
         fresh.push(e);
         existingUrls.add(e.sourceUrl); // 같은 배치 내 중복 방지
+        sourceCounts.set(e.source, sourceCount + 1);
         if (fresh.length >= newCap) break;
       }
 

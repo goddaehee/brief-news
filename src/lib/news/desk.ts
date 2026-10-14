@@ -145,7 +145,7 @@ export function polishTakeaway(raw: string): string {
     } else {
       // 문장 경계가 없으면 연결어미(하니/으니/으며/고/면서/지만/는데)에서 자름
       // 예: "본격화하니 국산 챗봇." → "본격화했다." (연결어미 앞까지만)
-      const connPattern = /(하니|으니|으며|이고|면서|지만|는데|해서|되어|되며|하고|거나|면|면|면)\s*/gu;
+      const connPattern = /(하니|으니|이며|이고|면서|지만|는데|해서|되어|되며|하고|거나|면|라면|거든|으니까|더라면|수록|아|어|여)\s*/gu;
       let lastConn = -1;
       let cm;
       while ((cm = connPattern.exec(truncated)) !== null) {
@@ -155,12 +155,21 @@ export function polishTakeaway(raw: string): string {
         // 연결어미 앞 부분만 사용하고 문장 종결로 변환
         let head = truncated.slice(0, lastConn).trim();
         // 연결어미 제거하고 종결형으로
-        head = head.replace(/(하니|으니|으며|이고|면서|지만|는데|해서|되어|되며|하고|거나|면)\s*$/, "");
+        head = head.replace(/(하니|으니|이며|이고|면서|지만|는데|해서|되어|되며|하고|거나|면|라면|거든|으니까|더라면|수록|아|어|여)\s*$/, "");
         t = head + (head.endsWith("다") ? "." : "다.");
       } else {
-        // 연결어미도 없으면 첫 문장만 사용 (파편 방지)
-        const firstSent = t.split(/(?<=다\.|함\.|음\.|됨\.|요\.)\s*/u)[0];
-        t = firstSent && hangulLen(firstSent) <= 90 ? firstSent.trim() : truncated.trim();
+        // 연결어미도 없으면 마지막 공백에서 자름 (단어 중간 절단 금지)
+        // 예: "국산 칩 스펙" → "국산 칩." (스펙을 스.로 자르지 않음)
+        const lastSpace = truncated.lastIndexOf(" ");
+        if (lastSpace > 30) {
+          let head = truncated.slice(0, lastSpace).trim();
+          // 마지막 단어가 조사/명사로 끝나면 완결형으로
+          if (!/[.다함음요]$/.test(head)) head += "다.";
+          t = head;
+        } else {
+          const firstSent = t.split(/(?<=다\.|함\.|음\.|됨\.|요\.)\s*/u)[0];
+          t = firstSent && hangulLen(firstSent) <= 90 ? firstSent.trim() : truncated.trim();
+        }
       }
     }
   }
@@ -187,6 +196,15 @@ export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summar
   if (/해라|하라/.test(item.takeaway)) return true;
   if (/[A-Za-z]{4,}·[A-Za-z]{4,}/.test(item.takeaway)) return true;
   if (item.grade === "important" && !IMPORTANT_HINT.test(`${item.title} ${item.takeaway}`)) return true;
+  // 파편 시사점: 마지막 문장이 완결형 어미(다./요./필요./권장./검토./확인./점검.)로 끝나지 않으면 재작성
+  // 예: "국산 챗봇.", "해당 지역.", "가격·성능." → 재작성 대상
+  const takeaway = item.takeaway.trim();
+  const sentences = takeaway.split(/(?<=다\.|요\.|필요\.|검토\.|권장\.|확인\.|점검\.|주시\.|전망\.|기회\.)\s*/u);
+  const lastSent = sentences[sentences.length - 1]?.trim() ?? "";
+  if (lastSent && !/(다\.|요\.|필요\.|검토\.|권장\.|확인\.|점검\.|주시\.|전망\.|기회\.)$/.test(lastSent)) {
+    // 마지막 문장이 30자 이상이면 완결된 문장일 수 있음 (예외)
+    if (lastSent.length < 30) return true;
+  }
   return false;
 }
 
