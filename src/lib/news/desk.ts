@@ -126,16 +126,23 @@ export function polishTakeaway(raw: string): string {
     combined = parts[0].trim();
   }
   t = combined;
-  // 그래도 90자 초과 시 (단일 문장이 긴 경우) 문장 경계에서 자르기
+  // 그래도 90자 초과 시: 90자 이내의 마지막 문장 경계에서 자름 (중간 절단 절대 금지)
   if (hangulLen(t) > 90) {
-    t = clipChars(t, 90);
-    // 잘린 뒤 마지막이 파편이면 제거
-    const sentences = t.split(/(?<=다\.|함\.|음\.|됨\.|요\.|필요\.|검토\.|권장\.|주시\.|전망\.|기회\.)\s*/u).filter((p) => p.trim());
-    if (sentences.length > 1) {
-      const last = sentences[sentences.length - 1].trim();
-      if (hangulLen(last) < 12) {
-        t = sentences.slice(0, -1).join(" ").trim();
-      }
+    const truncated = [...t].slice(0, 90).join("");
+    // 문장 종결 패턴 (다., 요., 필요., 권장. 등) 중 90자 내 마지막 위치 찾기
+    const endPattern = /(다\.|함\.|음\.|됨\.|요\.|필요\.|검토\.|권장\.|주시\.|전망\.|기회\.)/gu;
+    let lastEnd = -1;
+    let m;
+    while ((m = endPattern.exec(truncated)) !== null) {
+      lastEnd = m.index + m[0].length;
+    }
+    if (lastEnd > 45) {
+      // 45자 이후에 문장 경계가 있으면 거기서 자름
+      t = truncated.slice(0, lastEnd).trim();
+    } else {
+      // 문장 경계가 없으면 첫 문장만 사용 (파편 방지)
+      const firstSent = t.split(/(?<=다\.|함\.|음\.|됨\.|요\.)\s*/u)[0];
+      t = firstSent && hangulLen(firstSent) <= 90 ? firstSent.trim() : truncated.trim();
     }
   }
   if (t && !/[.다함음요]$/.test(t)) t += ".";
