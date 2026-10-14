@@ -119,6 +119,14 @@ export function polishTakeaway(raw: string): string {
   }
   t = parts.slice(0, 2).join(" ").trim();
   t = clipChars(t, 90);
+  // 잘린 문장 조각 제거: 마지막 문장이 12자 미만이면 버림 (예: "제조 CAD." 같은 파편)
+  const sentences = t.split(/(?<=다\.|함\.|음\.|됨\.|요\.|필요\.|검토\.|권장\.|주시\.|전망\.|기회\.)\s*/u).filter((p) => p.trim());
+  if (sentences.length > 1) {
+    const last = sentences[sentences.length - 1].trim();
+    if (hangulLen(last) < 12) {
+      t = sentences.slice(0, -1).join(" ").trim();
+    }
+  }
   if (t && !/[.다함음요]$/.test(t)) t += ".";
   return t;
 }

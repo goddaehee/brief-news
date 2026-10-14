@@ -184,10 +184,12 @@ export function parseFeedXml(xml: string, fallbackSource: string): RssEntry[] {
     const parsed = Date.parse(dateRaw);
     const summary =
       tag(chunk, "description") || tag(chunk, "summary") || tag(chunk, "content") || title;
+    // 날짜 파싱 실패 시 폴백: 인덱스 기반 오프셋으로 중복 방지 (RSS pubDate 고유성)
+    const fallbackDate = Date.now() - entries.length * 1000;
     entries.push({
       title,
       link: link.trim(),
-      date: Number.isFinite(parsed) ? parsed : Date.now(),
+      date: Number.isFinite(parsed) ? parsed : fallbackDate,
       summary: summary.slice(0, 800),
     });
     if (entries.length >= 20) break;

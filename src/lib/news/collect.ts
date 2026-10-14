@@ -256,10 +256,10 @@ function tooSimilar(a: string, b: string): boolean {
   const tb = new Set(
     b.toLowerCase().replace(/[^0-9a-z\uAC00-\uD7A3]+/gi, " ").split(" ").filter((t) => t.length >= 2),
   );
-  if (ta.size >= 4 && tb.size >= 4) {
+  if (ta.size >= 3 && tb.size >= 3) {
     let inter = 0;
     for (const t of ta) if (tb.has(t)) inter += 1;
-    if (inter >= 4 && inter / Math.min(ta.size, tb.size) >= 0.7) return true;
+    if (inter >= 3 && inter / Math.min(ta.size, tb.size) >= 0.6) return true;
   }
   return false;
 }

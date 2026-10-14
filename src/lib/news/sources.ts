@@ -24,7 +24,7 @@ export const NEWS_SOURCES: NewsSource[] = [
     name: "ZDNet Korea",
     rss: "https://www.zdnet.co.kr/feed",
     titleMustMatch: true,
-    rank: 9,
+    rank: 6,
   },
   {
     id: "etnews",
