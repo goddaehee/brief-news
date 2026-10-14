@@ -17,7 +17,7 @@ export const NEWS_SOURCES: NewsSource[] = [
     id: "aitimeskr",
     name: "인공지능신문",
     rss: "https://www.aitimes.kr/rss/allArticle.xml",
-    rank: 8,
+    rank: 6,
   },
   {
     id: "zdnet",

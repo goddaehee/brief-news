@@ -230,14 +230,22 @@ export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summar
   if (/해라|하라/.test(item.takeaway)) return true;
   if (/[A-Za-z]{4,}·[A-Za-z]{4,}/.test(item.takeaway)) return true;
   if (item.grade === "important" && !IMPORTANT_HINT.test(`${item.title} ${item.takeaway}`)) return true;
-  // 파편 시사점: 마지막 문장이 완결형 어미(다./요./필요./권장./검토./확인./점검.)로 끝나지 않으면 재작성
-  // 예: "국산 챗봇.", "해당 지역.", "가격·성능." → 재작성 대상
+  // 파편 시사점: 아티팩트 패턴이면 무조건 재작성 (길이 조건 제거 — Claude 발견: 파편은 짧아서 기존 조건에 안 걸림)
+  // ",다.", "·" 시작, 조사/명사 단독 종결, 단어 중간 절단
   const takeaway = item.takeaway.trim();
+  if (/,다\.|^[·•\-–—]/.test(takeaway)) return true;
+  // 마지막 문장이 조사(에/의/를/을/가/이/와/과/로/에서/에게)로 끝나면 파편
+  if (/(에|의|를|을|가|이|와|과|로|에서|에게|한테|보다|처럼)\.$/.test(takeaway)) return true;
+  // 마지막 문장이 명사 단독으로 끝나면 파편 (예: "국산 챗봇.", "가격·성능.", "해당 지역.")
+  // 단, 완결형 어미(다./요./필요./권장./검토./확인./점검.)로 끝나면 완결
   const sentences = takeaway.split(/(?<=다\.|요\.|필요\.|검토\.|권장\.|확인\.|점검\.|주시\.|전망\.|기회\.)\s*/u);
   const lastSent = sentences[sentences.length - 1]?.trim() ?? "";
   if (lastSent && !/(다\.|요\.|필요\.|검토\.|권장\.|확인\.|점검\.|주시\.|전망\.|기회\.)$/.test(lastSent)) {
-    // 마지막 문장이 30자 이상이면 완결된 문장일 수 있음 (예외)
-    if (lastSent.length < 30) return true;
+    // 마지막 문장이 완결 어미로 안 끝나면 파편 (길이 무관)
+    // 단, 동사형 종결(진출., 확대., 강화., 묶임., 지목됨.)은 완결로 인정
+    if (!/(출|입|화|강|약|임|됨|남|됨|됨|씀|옴|감|남|됨|됨|됨)\.$/.test(lastSent)) {
+      return true;
+    }
   }
   return false;
 }
