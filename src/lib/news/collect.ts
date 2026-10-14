@@ -19,7 +19,6 @@ import {
   lastRunAt,
   listNews,
   releaseCollectLock,
-  sourceUrlExists,
   tryCollectLock,
   updateItem,
   upsertBriefing,
@@ -72,28 +71,33 @@ export async function collectOnce(): Promise<CollectResult> {
 
     try {
       const existing = await listNews();
-      const rewritten = await rewriteStale(existing);
-      const entries = await pullRss();
+      // rewriteStale과 pullRss는 독립적이므로 병렬 실행 (Vercel 60초 제한 대응)
+      const [rewritten, entries] = await Promise.all([
+        rewriteStale(existing),
+        pullRss(),
+      ]);
       fetched = entries.length;
       const fresh: RawEntry[] = [];
       const newCap = rewritten > 0 ? Math.min(3, COLLECT_MAX_NEW) : COLLECT_MAX_NEW;
+      // DB 쿼리 대신 메모리의 existing Set으로 중복 체크 (순차 DB 왕복 제거)
+      const existingUrls = new Set(existing.filter((i) => !isSeedItem(i)).map((i) => i.sourceUrl));
+      const existingItems = existing.filter((i) => !isSeedItem(i));
       for (const e of entries) {
-        if (await sourceUrlExists(e.sourceUrl)) {
+        if (existingUrls.has(e.sourceUrl)) {
           skipped += 1;
           continue;
         }
         if (
-          existing
-            .filter((i) => !isSeedItem(i))
-            .some(
-              (i) => tooSimilar(i.title, e.title) || tooSimilar(i.originalTitle, e.title),
-            ) ||
+          existingItems.some(
+            (i) => tooSimilar(i.title, e.title) || tooSimilar(i.originalTitle, e.title),
+          ) ||
           fresh.some((f) => tooSimilar(f.title, e.title))
         ) {
           skipped += 1;
           continue;
         }
         fresh.push(e);
+        existingUrls.add(e.sourceUrl); // 같은 배치 내 중복 방지
         if (fresh.length >= newCap) break;
       }
 
@@ -263,27 +267,27 @@ function tooSimilar(a: string, b: string): boolean {
 async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>): Promise<number> {
   if (!resolveLlm()) return 0;
   const stale = existing.filter((i) => !isSeedItem(i) && needsRewrite(i)).slice(0, COLLECT_REWRITE_MAX);
-  let n = 0;
-  for (const item of stale) {
-    if (shouldDrop(item.title, item.summary) || shouldDrop(item.originalTitle, item.summary)) {
-      if (await deleteItem(item.id)) n += 1;
-      continue;
-    }
-    const payload = await classifyEntry({
-      title: item.originalTitle || item.title,
-      sourceUrl: item.sourceUrl,
-      source: item.source,
-      date: item.publishedAt,
-      summary: item.summary,
-    });
-    if (payload.keep === false) {
-      if (await deleteItem(item.id)) n += 1;
-      continue;
-    }
-    payload.publishedAt = item.publishedAt;
-    if (await updateItem(item.id, payload)) n += 1;
-  }
-  return n;
+  // 순차 처리 시 최대 3×25초=75초 → 병렬로 변경 (Vercel 60초 제한 대응)
+  const results = await Promise.all(
+    stale.map(async (item): Promise<number> => {
+      if (shouldDrop(item.title, item.summary) || shouldDrop(item.originalTitle, item.summary)) {
+        return (await deleteItem(item.id)) ? 1 : 0;
+      }
+      const payload = await classifyEntry({
+        title: item.originalTitle || item.title,
+        sourceUrl: item.sourceUrl,
+        source: item.source,
+        date: item.publishedAt,
+        summary: item.summary,
+      });
+      if (payload.keep === false) {
+        return (await deleteItem(item.id)) ? 1 : 0;
+      }
+      payload.publishedAt = item.publishedAt;
+      return (await updateItem(item.id, payload)) ? 1 : 0;
+    }),
+  );
+  return results.reduce((a, b) => a + b, 0);
 }
 
 async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
