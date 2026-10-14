@@ -181,7 +181,13 @@ export function parseFeedXml(xml: string, fallbackSource: string): RssEntry[] {
     if (!title || !link) continue;
     const dateRaw =
       tag(chunk, "pubDate") || tag(chunk, "published") || tag(chunk, "updated") || "";
-    const parsed = Date.parse(dateRaw);
+    let parsed = Date.parse(dateRaw);
+    // 타임존 오표기 수정: 일부 국내 소스(디일렉 등)가 KST 시간을 GMT로 잘못 표기함
+    // 예: "14:46 GMT"가 실제로는 14:46 KST → 변환 시 23:46 KST(미래)가 됨
+    // 파싱 결과가 현재보다 1시간 이상 미래면, 9시간 빼서 KST로 보정
+    if (Number.isFinite(parsed) && parsed > Date.now() + 3600_000) {
+      parsed -= 9 * 3600_000;
+    }
     const summary =
       tag(chunk, "description") || tag(chunk, "summary") || tag(chunk, "content") || title;
     // 날짜 파싱 실패 시 폴백: 인덱스 기반 오프셋으로 중복 방지 (RSS pubDate 고유성)
