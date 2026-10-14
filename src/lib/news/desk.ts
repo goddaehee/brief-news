@@ -182,15 +182,27 @@ export function polishTakeaway(raw: string): string {
     }
   }
   if (t && !/[.다함음요]$/.test(t)) t += ".";
-  // fail-closed 게이트: 아티팩트가 있으면 첫 문장만 사용 (깨진 문장은 안 보여주는 게 낫다)
-  // ",다.", "·" 시작, ",다" 같은 패턴 제거
+  // fail-closed 게이트: 어떤 문장이라도 아티팩트가 있으면 첫 문장만 사용
+  // 깨진 문장은 안 보여주는 게 낫다. 고치려 하지 말고 버림.
+  // 검사: ",다." anywhere, "·" 시작 (어느 문장이든), 마지막 문장 미완결
+  const sentences = t.split(/(?<=다\.|요\.|필요\.|검토\.|권장\.|확인\.|점검\.|주시\.|전망\.|기회\.)\s*/u).filter((s) => s.trim());
+  const hasArtifact = sentences.some((s) => /,다\.|^[·•\-–—]/.test(s.trim())) ||
+    (sentences.length > 0 && !/(다\.|요\.|필요\.|검토\.|권장\.|확인\.|점검\.|주시\.|전망\.|기회\.)$/.test(sentences[sentences.length - 1].trim()));
+  if (hasArtifact && sentences.length > 1) {
+    // 첫 문장이 깨끗하면 첫 문장만 사용
+    const first = sentences[0].trim();
+    if (!/,다\.|^[·•\-–—]/.test(first) && /(다\.|요\.|필요\.|검토\.|권장\.|확인\.|점검\.|주시\.|전망\.|기회\.)$/.test(first)) {
+      t = first;
+    }
+  } else if (hasArtifact && sentences.length === 1) {
+    // 단일 문장인데 아티팩트가 있으면 첫 문장을 완결형으로
+    let first = sentences[0].trim().replace(/,다\./g, "다.").replace(/^[·•\-–—\s]+/, "").trim();
+    if (!/(다\.|요\.)$/.test(first)) first = first.replace(/[,·•\-–—:;]+$/, "").trim() + "다.";
+    t = first;
+  }
+  // 최종 정리: ",다." 제거, "·" 시작 제거
   t = t.replace(/,다\./g, "다.").replace(/,다$/g, "다.");
   t = t.replace(/^[·•\-–—\s]+/, "").trim();
-  // 두 문장 중 첫 문장에 아티팩트가 있으면 첫 문장만 사용
-  if (/,\s*다\.|^[·•]/.test(t)) {
-    const firstSent = t.split(/(?<=다\.|요\.)\s*/u)[0];
-    if (firstSent && !/,다\.|^[·•]/.test(firstSent)) t = firstSent.trim();
-  }
   return t;
 }
 
@@ -198,6 +210,11 @@ export function polishGrade(grade: Grade, title: string, takeaway: string): Grad
   const t = `${title} ${takeaway}`;
   if (grade === "breaking" && !/장애|다운|중단|지연|가격|인하|인상/.test(t)) return "note";
   if (grade === "important" && !IMPORTANT_HINT.test(t)) return "note";
+  // 승격: LLM이 note로 매겼어도 강한 중요 신호가 있으면 important로 승격
+  // (힌트는 강등 필터가 아니라 양방향 게이트여야 한다)
+  if (grade === "note" && /파산|상장|IPO|AI 자가복제|사이버 공격|대규모 계약|대규모 투자|인수|합병|보안 경고|취약점|유출|소송|벌금|규제|법안/.test(t)) {
+    return "important";
+  }
   return grade;
 }
 
