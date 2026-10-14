@@ -24,7 +24,7 @@ export const DESK_SYSTEM = `당신은 한국 AI 실무자용 뉴스 터미널 br
 시사점 takeaway — 원본 문장 뼈대
 - 정확히 두 조각: "사실 한 줄. 할 일 한 줄."
 - 할 일은 구체적 행동으로: 누가 무엇을 해야 하는지 명시 ("도입 전 가격 비교 권장", "API 사용 중이면 폴백 로직 점검 필요").
-- 금지: "~주시 필요", "~동향 주시", "~영향 주시" 같은 관망형 어미. 막연한 주시로 끝내지 말 것.
+- 금지: "~주시 필요", "~동향 주시", "~영향 주시", "~검토할 시점", "~검증해볼 시점", "~참고할 만함" 같은 관망형·모호한 어미. 막연한 표현으로 끝내지 말 것. 할 일 문장은 반드시 필요/권장/검토/확인/점검 중 하나로 끝낼 것.
 - 제품·모델명은 영문 병기: "Maia(마이아)", "Claude Code(클로드 코드)".
 - 원문 첫 문장·리드 복사 금지. 명령조(해라·하라) 금지.
 
@@ -117,14 +117,25 @@ export function polishTakeaway(raw: string): string {
     const action = parts.filter((p) => /필요|검토|권장|주시|기회|확인/.test(p));
     parts = action.length ? action.slice(0, 2) : parts.filter((p) => !LEAD_HINT.test(p)).slice(0, 2);
   }
-  t = parts.slice(0, 2).join(" ").trim();
-  t = clipChars(t, 90);
-  // 잘린 문장 조각 제거: 마지막 문장이 12자 미만이면 버림 (예: "제조 CAD." 같은 파편)
-  const sentences = t.split(/(?<=다\.|함\.|음\.|됨\.|요\.|필요\.|검토\.|권장\.|주시\.|전망\.|기회\.)\s*/u).filter((p) => p.trim());
-  if (sentences.length > 1) {
-    const last = sentences[sentences.length - 1].trim();
-    if (hangulLen(last) < 12) {
-      t = sentences.slice(0, -1).join(" ").trim();
+  // 문장 경계 기준으로 자르기: 90자를 넘으면 두 번째 문장을 통째로 버림 (중간 절단 금지)
+  // Claude 지적: clipChars가 문장 중간을 자르면서 서술어 탈락 파편 생성
+  parts = parts.slice(0, 2);
+  let combined = parts.join(" ").trim();
+  if (hangulLen(combined) > 90 && parts.length > 1) {
+    // 두 문장 합이 90자 초과 → 첫 문장만 사용 (완결성 우선)
+    combined = parts[0].trim();
+  }
+  t = combined;
+  // 그래도 90자 초과 시 (단일 문장이 긴 경우) 문장 경계에서 자르기
+  if (hangulLen(t) > 90) {
+    t = clipChars(t, 90);
+    // 잘린 뒤 마지막이 파편이면 제거
+    const sentences = t.split(/(?<=다\.|함\.|음\.|됨\.|요\.|필요\.|검토\.|권장\.|주시\.|전망\.|기회\.)\s*/u).filter((p) => p.trim());
+    if (sentences.length > 1) {
+      const last = sentences[sentences.length - 1].trim();
+      if (hangulLen(last) < 12) {
+        t = sentences.slice(0, -1).join(" ").trim();
+      }
     }
   }
   if (t && !/[.다함음요]$/.test(t)) t += ".";
