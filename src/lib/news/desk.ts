@@ -208,6 +208,22 @@ export function polishTakeaway(raw: string): string {
   // 최종 정리: ",다." 제거, "·" 시작 제거
   t = t.replace(/,다\./g, "다.").replace(/,다$/g, "다.");
   t = t.replace(/^[·•\-–—\s]+/, "").trim();
+  // 단어 중간 절단 방지: 마지막 단어가 1-2자로 잘린 것 같으면 제거
+  // 예: "엣지 디바이스 펌웨다." → "엣지 디바이스." (펌웨는 "펌웨어"의 잘림)
+  // 단, 정당한 1-2자 단어(것, 것, 수, 등)는 유지
+  const words = t.split(/\s+/);
+  if (words.length > 1) {
+    const last = words[words.length - 1];
+    // "펌웨다.", "스다." 같은 패턴: 2-3자 + "다." 이고, 앞 단어가 명사로 끝나면 잘림으로 판단
+    const cutPattern = /^([가-힣]{1,2})다\.$/;
+    const m = last.match(cutPattern);
+    if (m && !/^(것|수|등|점|건|때|곳|일|년|월|주|개|명|차|번|등)$/.test(m[1])) {
+      // 앞 문맥 확인: 잘린 단어가 명사구 뒤에 있으면 제거
+      words.pop();
+      t = words.join(" ");
+      if (!/[.다함음요]$/.test(t)) t += ".";
+    }
+  }
   return t;
 }
 
