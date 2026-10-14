@@ -30,6 +30,11 @@ export const DESK_SYSTEM = `당신은 한국 AI 실무자용 뉴스 터미널 br
 - 금지: "~주시 필요", "~동향 주시", "~영향 주시", "~검토할 시점", "~검증해볼 시점", "~참고할 만함" 같은 관망형·모호한 어미. 막연한 표현으로 끝내지 말 것. 할 일 문장은 반드시 필요/권장/검토/확인/점검 중 하나로 끝낼 것.
 - 제품·모델명은 영문 병기: "Maia(마이아)", "Claude Code(클로드 코드)".
 - 원문 첫 문장·리드 복사 금지. 명령조(해라·하라) 금지.
+- 에디토리얼 프레임: 사건에 의미를 부여하는 한 단어를 첫 문장에 넣을 것.
+  - 파산/몰락: "활성 1200만 서비스도 수익성·안전 소송에 무너져." (X: "파산 보호를 신청하고 매각을 추진 중")
+  - 데이터 집중: "정부 사업 데이터가 AI허브로 집결." (X: "학습데이터의 개방이 법적으로 묶임")
+  - 병목: "AI 도구만으론 부서 간 협업·승인 병목이 생산성을 가로막음." (X: "도구 도입이 늘고 있다")
+  - 비용 누적: "에이전트의 백그라운드 자율 실행이 조용히 비용을 누적시킴." (X: "에이전트가 실행된다")
 
 요약 summary
 - 3문장. 사실만. 시사점과 겹치지 말 것.
@@ -230,6 +235,9 @@ export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summar
   if (/해라|하라/.test(item.takeaway)) return true;
   if (/[A-Za-z]{4,}·[A-Za-z]{4,}/.test(item.takeaway)) return true;
   if (item.grade === "important" && !IMPORTANT_HINT.test(`${item.title} ${item.takeaway}`)) return true;
+  // 승격: [참고]인데 강한 중요 신호가 있으면 재작성 → polishGrade 승격 로직이 적용됨
+  // (기존 [참고] 기사는 승격 로직 배포 전 분류분이라 재작성이 필요)
+  if (item.grade === "note" && /파산|상장|IPO|AI 자가복제|사이버 공격|대규모 계약|대규모 투자|인수|합병|보안 경고|취약점|유출|소송|벌금|규제|법안/.test(`${item.title} ${item.takeaway}`)) return true;
   // 파편 시사점: 아티팩트 패턴이면 무조건 재작성 (길이 조건 제거 — Claude 발견: 파편은 짧아서 기존 조건에 안 걸림)
   // ",다.", "·" 시작, 조사/명사 단독 종결, 단어 중간 절단
   const takeaway = item.takeaway.trim();
