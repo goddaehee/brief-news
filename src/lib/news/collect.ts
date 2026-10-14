@@ -265,6 +265,8 @@ function normalizeProductNames(s: string): string {
     [/챗지피티/gi, "chatgpt"],
     [/클로드/gi, "claude"],
     [/오픈ai/gi, "openai"],
+    [/앤스로픽/gi, "anthropic"],
+    [/앤트로픽/gi, "anthropic"],
     [/딥시크/gi, "deepseek"],
     [/아르곤/gi, "argon"],
     [/엔비디아/gi, "nvidia"],
