@@ -8,8 +8,10 @@ export const DROP_HINT =
   /만찬|국빈|동행|시상식|포토\s*뉴스|오늘의 인물|출근길|레드카펫|기념촬영|개막식 참석/i;
 
 /** Pipeline-now. Name-drops (출시·연구소) are 참고. */
+/** 3차 평가: [중요] 25% 인플레이션 (목표 12-18%, 원본 14%). 힌트가 너무 넓어 거의 모든 기사가 통과.
+ *  일반 출시/발표/협력은 제외하고, 가격·보안·소송·규제·대규모 거래·기록 돌파만 남김. */
 export const IMPORTANT_HINT =
-  /연기|가격|인하|인상|침해|장애|중단|제재|유출|다운|수출 통제|계정 탈취|출시 연기|취약점|해킹|공격|위협|경고|주의보|소송|벌금|과징금|리콜|독점|반독점|규제|법안|정책|가이드라인|계약|투자|인수|합병|출시|공개|발표|선보|론칭|최초|기록|돌파|경신|협력|제휴|파트너십|도입|확대|무료|오픈소스 공개|벤치마크/;
+  /가격|인하|인상|침해|장애|중단|제재|유출|다운|수출 통제|계정 탈취|출시 연기|취약점|해킹|공격|위협|경고|주의보|소송|벌금|과징금|리콜|독점|반독점|규제|법안|정책|가이드라인|대규모 계약|대규모 투자|인수|합병|최초|기록|돌파|경신|오픈소스 공개|벤치마크 1위|파산|상장|IPO/;
 
 export const LEAD_HINT = /마련했다|발표했다|밝혔다|나섰다|전했다|보도했다/;
 
@@ -141,9 +143,25 @@ export function polishTakeaway(raw: string): string {
       // 45자 이후에 문장 경계가 있으면 거기서 자름
       t = truncated.slice(0, lastEnd).trim();
     } else {
-      // 문장 경계가 없으면 첫 문장만 사용 (파편 방지)
-      const firstSent = t.split(/(?<=다\.|함\.|음\.|됨\.|요\.)\s*/u)[0];
-      t = firstSent && hangulLen(firstSent) <= 90 ? firstSent.trim() : truncated.trim();
+      // 문장 경계가 없으면 연결어미(하니/으니/으며/고/면서/지만/는데)에서 자름
+      // 예: "본격화하니 국산 챗봇." → "본격화했다." (연결어미 앞까지만)
+      const connPattern = /(하니|으니|으며|이고|면서|지만|는데|해서|되어|되며|하고|거나|면|면|면)\s*/gu;
+      let lastConn = -1;
+      let cm;
+      while ((cm = connPattern.exec(truncated)) !== null) {
+        lastConn = cm.index + cm[0].length;
+      }
+      if (lastConn > 30) {
+        // 연결어미 앞 부분만 사용하고 문장 종결로 변환
+        let head = truncated.slice(0, lastConn).trim();
+        // 연결어미 제거하고 종결형으로
+        head = head.replace(/(하니|으니|으며|이고|면서|지만|는데|해서|되어|되며|하고|거나|면)\s*$/, "");
+        t = head + (head.endsWith("다") ? "." : "다.");
+      } else {
+        // 연결어미도 없으면 첫 문장만 사용 (파편 방지)
+        const firstSent = t.split(/(?<=다\.|함\.|음\.|됨\.|요\.)\s*/u)[0];
+        t = firstSent && hangulLen(firstSent) <= 90 ? firstSent.trim() : truncated.trim();
+      }
     }
   }
   if (t && !/[.다함음요]$/.test(t)) t += ".";

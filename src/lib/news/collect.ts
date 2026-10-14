@@ -236,11 +236,38 @@ function byDeskPriority(a: RawEntry, b: RawEntry): number {
 }
 
 function foldTitle(s: string): string {
-  return s
+  return normalizeProductNames(s)
     .toLowerCase()
     .replace(/https?:\/\/\S+/g, "")
     .replace(/[^0-9a-z\uAC00-\uD7A3]+/gi, "")
     .slice(0, 96);
+}
+
+// 영문/한글 표기 변형 통일 (예: Gemini ↔ 제미나이, ChatGPT ↔ 챗GPT)
+// 표기만 다른 중복 기사를 잡기 위한 정규화
+function normalizeProductNames(s: string): string {
+  const map: [RegExp, string][] = [
+    [/제미나이/gi, "gemini"],
+    [/챗gpt/gi, "chatgpt"],
+    [/챗지피티/gi, "chatgpt"],
+    [/클로드/gi, "claude"],
+    [/오픈ai/gi, "openai"],
+    [/딥시크/gi, "deepseek"],
+    [/아르곤/gi, "argon"],
+    [/엔비디아/gi, "nvidia"],
+    [/구글/gi, "google"],
+    [/마이크로소프트/gi, "microsoft"],
+    [/메타/gi, "meta"],
+    [/애플/gi, "apple"],
+    [/아마존/gi, "amazon"],
+    [/테슬라/gi, "tesla"],
+    [/디즈니/gi, "disney"],
+    [/캐릭터닷ai/gi, "characterai"],
+    [/캐릭터ai/gi, "characterai"],
+  ];
+  let out = s;
+  for (const [re, rep] of map) out = out.replace(re, rep);
+  return out;
 }
 
 function tooSimilar(a: string, b: string): boolean {
