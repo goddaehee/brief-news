@@ -8,10 +8,10 @@ export const DROP_HINT =
   /만찬|국빈|동행|시상식|포토\s*뉴스|오늘의 인물|출근길|레드카펫|기념촬영|개막식 참석/i;
 
 /** Pipeline-now. Name-drops (출시·연구소) are 참고. */
-/** 3차 평가: [중요] 25% 인플레이션 (목표 12-18%, 원본 14%). 힌트가 너무 넓어 거의 모든 기사가 통과.
- *  일반 출시/발표/협력은 제외하고, 가격·보안·소송·규제·대규모 거래·기록 돌파만 남김. */
+/** 5차 평가: [중요] 7.5% 과소 (목표 12-18%). 힌트를 약간 복원.
+ *  일반 출시/발표/협력은 제외 유지, 주요 모델 출시·보안 경고·대규모 계약 추가. */
 export const IMPORTANT_HINT =
-  /가격|인하|인상|침해|장애|중단|제재|유출|다운|수출 통제|계정 탈취|출시 연기|취약점|해킹|공격|위협|경고|주의보|소송|벌금|과징금|리콜|독점|반독점|규제|법안|정책|가이드라인|대규모 계약|대규모 투자|인수|합병|최초|기록|돌파|경신|오픈소스 공개|벤치마크 1위|파산|상장|IPO/;
+  /가격|인하|인상|침해|장애|중단|제재|유출|다운|수출 통제|계정 탈취|출시 연기|취약점|해킹|공격|위협|경고|주의보|소송|벌금|과징금|리콜|독점|반독점|규제|법안|정책|가이드라인|대규모 계약|대규모 투자|인수|합병|최초|기록|돌파|경신|오픈소스 공개|벤치마크 1위|파산|상장|IPO|주요 모델 출시|신모델 공개|보안 경고|AI 자가복제|웜|사이버 공격/;
 
 export const LEAD_HINT = /마련했다|발표했다|밝혔다|나섰다|전했다|보도했다/;
 
@@ -156,6 +156,11 @@ export function polishTakeaway(raw: string): string {
         let head = truncated.slice(0, lastConn).trim();
         // 연결어미 제거하고 종결형으로
         head = head.replace(/(하니|으니|이며|이고|면서|지만|는데|해서|되어|되며|하고|거나|면|라면|거든|으니까|더라면|수록|아|어|여)\s*$/, "");
+        // ",다." 버그 방지: 끝의 쉼표·불릿·특수문자 제거 후 종결형 추가
+        head = head.replace(/[,·•\-–—:;]+$/, "").trim();
+        // "·"로 시작하는 불릿 제거
+        head = head.replace(/^[·•\-–—\s]+/, "").trim();
+        if (!head) head = truncated.slice(0, lastConn).trim().replace(/[,·•\-–—:;]+$/, "").trim();
         t = head + (head.endsWith("다") ? "." : "다.");
       } else {
         // 연결어미도 없으면 마지막 공백에서 자름 (단어 중간 절단 금지)
@@ -163,6 +168,9 @@ export function polishTakeaway(raw: string): string {
         const lastSpace = truncated.lastIndexOf(" ");
         if (lastSpace > 30) {
           let head = truncated.slice(0, lastSpace).trim();
+          // 끝의 쉼표·불릿 제거, "·" 시작 제거
+          head = head.replace(/[,·•\-–—:;]+$/, "").trim();
+          head = head.replace(/^[·•\-–—\s]+/, "").trim();
           // 마지막 단어가 조사/명사로 끝나면 완결형으로
           if (!/[.다함음요]$/.test(head)) head += "다.";
           t = head;
@@ -174,6 +182,15 @@ export function polishTakeaway(raw: string): string {
     }
   }
   if (t && !/[.다함음요]$/.test(t)) t += ".";
+  // fail-closed 게이트: 아티팩트가 있으면 첫 문장만 사용 (깨진 문장은 안 보여주는 게 낫다)
+  // ",다.", "·" 시작, ",다" 같은 패턴 제거
+  t = t.replace(/,다\./g, "다.").replace(/,다$/g, "다.");
+  t = t.replace(/^[·•\-–—\s]+/, "").trim();
+  // 두 문장 중 첫 문장에 아티팩트가 있으면 첫 문장만 사용
+  if (/,\s*다\.|^[·•]/.test(t)) {
+    const firstSent = t.split(/(?<=다\.|요\.)\s*/u)[0];
+    if (firstSent && !/,다\.|^[·•]/.test(firstSent)) t = firstSent.trim();
+  }
   return t;
 }
 
