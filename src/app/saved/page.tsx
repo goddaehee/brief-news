@@ -15,6 +15,11 @@ export default function SavedPage() {
   const [items, setItems] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(() => Date.now());
+  // 북마크 ID 목록을 안정적인 문자열 키로 변환 (객체 참조 변경에 의한 무한 재실행 방지)
+  const bookmarkIds = Object.entries(bookmarks)
+    .sort((a, b) => b[1] - a[1])
+    .map(([id]) => id)
+    .join(",");
 
   useEffect(() => {
     hydratePrefs();
@@ -24,21 +29,28 @@ export default function SavedPage() {
 
   useEffect(() => {
     // 최신 저장 순으로 정렬 (timestamp 내림차순)
-    const ids = Object.entries(bookmarks)
-      .sort((a, b) => b[1] - a[1])
-      .map(([id]) => id);
+    const ids = bookmarkIds ? bookmarkIds.split(",") : [];
     if (ids.length === 0) {
       setItems([]);
       setLoading(false);
       return;
     }
     setLoading(true);
-    fetch(`/api/items?ids=${encodeURIComponent(ids.join(","))}`)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    fetch(`/api/items?ids=${encodeURIComponent(ids.join(","))}`, { signal: controller.signal })
       .then((r) => r.json())
       .then((d) => setItems(Array.isArray(d.items) ? d.items : []))
       .catch(() => setItems([]))
-      .finally(() => setLoading(false));
-  }, [bookmarks]);
+      .finally(() => {
+        clearTimeout(timeoutId);
+        setLoading(false);
+      });
+    return () => {
+      clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [bookmarkIds]);
 
   return (
     <div className="mx-auto max-w-3xl px-4 pb-24">
