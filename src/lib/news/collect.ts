@@ -31,11 +31,13 @@ const SKIP_HINT =
   /장내매수|최대주주|액면병합|변경상장|유상증자|무상증자|주식\s*취득|임원\s*변동|거래정지|시간외|배당\s*공시|youtube|youtu\.be|노트북 후보|특징주|테마주|급등주|상한가|하한가|공시\b|거주 세계|자사주|만찬|국빈|시상식|포토\s*뉴스|오늘의 인물/i;
 
 /**
- * 벤더 블로그(OpenAI/Google/NVIDIA 등)의 고객 사례(customer story)는 PR이므로 수집에서 제외.
+ * 벤더 블로그(OpenAI/Google/NVIDIA 등)의 고객 사례(customer story)·에코시스템 홍보는 PR이므로 수집에서 제외.
  * 예: "Amp puts AI agents to work beyond code with OpenAI models" (출처: OpenAI)
  *     "SentinelOne cuts malware analysis from weeks to hours" (본문에 "With OpenAI Daybreak")
+ *     "노르딕, 엔비디아 손잡고 유럽 AI 컴퓨팅 허브로" (출처: NVIDIA, blogs.nvidia.com)
  * 이런 글은 헤드라인의 주어가 타사인데 출처가 벤더라 독자를 혼란스럽게 한다.
  * (12차 평가: 출처 라벨 오류 1건→2건 확산의 실제 원인 — 매핑 버그가 아니라 고객 사례 유입)
+ * (13차 평가: 벤더 필터가 "How..." 패턴만 보고 에코시스템 홍보 글을 통과시킴 — 파트너십 패턴 추가)
  */
 const VENDOR_BLOG_SOURCES = new Set([
   "OpenAI",
@@ -44,16 +46,35 @@ const VENDOR_BLOG_SOURCES = new Set([
   "NVIDIA",
   "Hugging Face",
 ]);
+/** 벤더 자사 블로그 도메인 (소스 라벨이 달라도 URL로 식별 — 방어선) */
+const VENDOR_BLOG_DOMAINS =
+  /(^|\.)blogs\.nvidia\.com$|(^|\.)openai\.com$|(^|\.)blog\.google$|(^|\.)deepmind\.google$|(^|\.)huggingface\.co$/i;
 /** "How [기업] ..." — 고객 사례의 전형적인 제목 형식 (단, "How we ..."는 자사 글이므로 제외) */
 const CUSTOMER_STORY_TITLE_HINT = /^how\s+(?!we\b)[a-z0-9]/i;
 /** "with OpenAI models", "With OpenAI Daybreak", "using ChatGPT API" — 타사 주어 + 자사 제품 언급 */
 const VENDOR_PRODUCT_HINT =
   /\b(with|using|built\s+with|powered\s+by)\s+(openai|chatgpt|gpt-?\d*|codex|gemini|deepmind|nvidia)\s+(models?|technology|api|platform|daybreak)\b/i;
+/** "손잡고", "와 협력", "파트너십", "협업" — 벤더 블로그의 파트너십/에코시스템 홍보 발표 */
+const PARTNERSHIP_HINT =
+  /손잡고|손을\s*잡|파트너십|파트너\s*협력|제휴|합작|협업|공동\s*(개발|발표|연구|협력)|와\s*협력|과\s*협력|와\s*함께|과\s*함께|partners?\s+with|partnership|collaborat\w*|teams?\s+up\s+with|teaming\s+up|joins?\s+forces/i;
+
+function isVendorBlog(e: RawEntry): boolean {
+  if (VENDOR_BLOG_SOURCES.has(e.source)) return true;
+  try {
+    return VENDOR_BLOG_DOMAINS.test(new URL(e.sourceUrl).hostname);
+  } catch {
+    return false;
+  }
+}
 
 function isVendorCustomerStory(e: RawEntry): boolean {
-  if (!VENDOR_BLOG_SOURCES.has(e.source)) return false;
+  if (!isVendorBlog(e)) return false;
   const text = `${e.title} ${e.summary}`;
-  return CUSTOMER_STORY_TITLE_HINT.test(text) || VENDOR_PRODUCT_HINT.test(text);
+  return (
+    CUSTOMER_STORY_TITLE_HINT.test(text) ||
+    VENDOR_PRODUCT_HINT.test(text) ||
+    PARTNERSHIP_HINT.test(text)
+  );
 }
 
 function lockOwner(): string {
