@@ -285,6 +285,16 @@ export function shouldDrop(title: string, summary: string): boolean {
   return DROP_HINT.test(title) || DROP_HINT.test(summary);
 }
 
+// 단어 중간 절단 아티팩트 (LLM이 음절을 떨어뜨린 경우 — 예: "펌웨어다" → "펌웨다")
+// 17차 P0: "[중요] 앤트로픽" 시사점 "…엣지 디바이스 펌웨다." 7라운드 잔존.
+// dedupe 승자라 삭제 대상이 아니고, 기존 파편 검사(완결 어미 기준)는
+// "펌웨다."를 정상 종결로 통과시켜서 별도 감지가 필요함.
+const TRUNCATED_HINT = /펌웨다|다다\.|요요\.|됨됨\.|니다다\./;
+
+function looksTruncated(s: string): boolean {
+  return TRUNCATED_HINT.test(s ?? "");
+}
+
 export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summary" | "grade">): boolean {
   if (shouldDrop(item.title, item.summary)) return true;
   if (hangulLen(item.title) > 46) return true;
@@ -306,6 +316,8 @@ export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summar
   // ",다.", "·" 시작, 조사/명사 단독 종결, 단어 중간 절단
   const takeaway = item.takeaway.trim();
   if (/,다\.|^[·•\-–—]/.test(takeaway)) return true;
+  // 17차 P0: 단어 중간 절단 아티팩트("펌웨다.", "다다." 등)는 무조건 재작성
+  if (looksTruncated(takeaway) || looksTruncated(item.summary)) return true;
   // 마지막 문장이 조사(에/의/를/을/가/이/와/과/로/에서/에게)로 끝나면 파편
   if (/(에|의|를|을|가|이|와|과|로|에서|에게|한테|보다|처럼)\.$/.test(takeaway)) return true;
   // 마지막 문장이 명사 단독으로 끝나면 파편 (예: "국산 챗봇.", "가격·성능.", "해당 지역.")
