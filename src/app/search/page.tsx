@@ -23,7 +23,11 @@ export async function generateMetadata({
   };
 }
 
-async function searchItems(q: string): Promise<{ items: NewsItem[]; now: number }> {
+async function searchItems(
+  q: string,
+  grade: string,
+  sort: string,
+): Promise<{ items: NewsItem[]; total: number; now: number }> {
   const h = await headers();
   const host =
     h.get("x-forwarded-host") ??
@@ -33,26 +37,33 @@ async function searchItems(q: string): Promise<{ items: NewsItem[]; now: number 
   const proto = h.get("x-forwarded-proto") ?? "https";
   try {
     const res = await fetch(
-      `${proto}://${host}/api/search?q=${encodeURIComponent(q)}`,
+      `${proto}://${host}/api/search?q=${encodeURIComponent(q)}&grade=${grade}&sort=${sort}&limit=20`,
       { next: { revalidate: 60 } },
     );
-    if (!res.ok) return { items: [], now: Date.now() };
+    if (!res.ok) return { items: [], total: 0, now: Date.now() };
     const data = await res.json();
     const items: NewsItem[] = Array.isArray(data.items) ? data.items : [];
-    return { items, now: Date.now() };
+    const total: number = typeof data.total === "number" ? data.total : items.length;
+    return { items, total, now: Date.now() };
   } catch {
-    return { items: [], now: Date.now() };
+    return { items: [], total: 0, now: Date.now() };
   }
 }
 
 export default async function SearchPage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string }>;
+  searchParams: Promise<{ q?: string; grade?: string; sort?: string }>;
 }) {
-  const { q } = await searchParams;
+  const { q, grade: gradeParam, sort: sortParam } = await searchParams;
   const query = (q ?? "").trim();
-  const { items, now } = query ? await searchItems(query) : { items: [], now: Date.now() };
+  const grade = ["all", "breaking", "important", "note", "tip"].includes(gradeParam ?? "")
+    ? gradeParam!
+    : "all";
+  const sort = sortParam === "relevant" ? "relevant" : "new";
+  const { items, total, now } = query
+    ? await searchItems(query, grade, sort)
+    : { items: [], total: 0, now: Date.now() };
 
   return (
     <main>
@@ -66,8 +77,43 @@ export default async function SearchPage({
                 “{query}” 검색 결과
               </h1>
               <p className="mt-1 font-mono-ts text-xs text-muted">
-                {items.length}건 · 제목·시사점·요약에서 검색
+                전체 {total}건 중 {items.length}건 표시 · 제목·시사점·요약에서 검색
               </p>
+              {/* 등급 필터 + 정렬 */}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {[
+                  { key: "all", label: "전체" },
+                  { key: "breaking", label: "속보" },
+                  { key: "important", label: "중요" },
+                  { key: "note", label: "참고" },
+                  { key: "tip", label: "팁" },
+                ].map((g) => (
+                  <a
+                    key={g.key}
+                    href={`/search?q=${encodeURIComponent(query)}&grade=${g.key}&sort=${sort}`}
+                    className={`rounded-full px-3 py-1 font-mono-ts text-[11px] transition-colors ${
+                      grade === g.key
+                        ? "bg-accent text-black"
+                        : "border border-line text-muted hover:text-head"
+                    }`}
+                  >
+                    {g.label}
+                  </a>
+                ))}
+                <span className="mx-1 text-muted">|</span>
+                <a
+                  href={`/search?q=${encodeURIComponent(query)}&grade=${grade}&sort=new`}
+                  className={`font-mono-ts text-[11px] ${sort === "new" ? "text-accent" : "text-muted hover:text-head"}`}
+                >
+                  최신순
+                </a>
+                <a
+                  href={`/search?q=${encodeURIComponent(query)}&grade=${grade}&sort=relevant`}
+                  className={`font-mono-ts text-[11px] ${sort === "relevant" ? "text-accent" : "text-muted hover:text-head"}`}
+                >
+                  관련도순
+                </a>
+              </div>
             </>
           ) : (
             <>
