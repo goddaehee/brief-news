@@ -268,11 +268,12 @@ export type SearchSort = "new" | "relevant";
 
 export async function searchNews(
   q: string,
-  opts: { grade?: string; sort?: SearchSort; limit?: number } = {},
+  opts: { grade?: string; sort?: SearchSort; limit?: number; offset?: number } = {},
 ): Promise<{ items: NewsItem[]; total: number }> {
   const grade = opts.grade ?? "all";
   const sort: SearchSort = opts.sort ?? "new";
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 50);
+  const offset = Math.max(opts.offset ?? 0, 0);
   // ILIKE 특수문자 이스케이프: %, _, \ 를 리터럴로 취급
   const like = `%${q.replace(/[%_\\]/g, (c) => `\\${c}`)}%`;
   const matchFields = (i: NewsItem) => {
@@ -318,7 +319,7 @@ export async function searchNews(
     const rows = await sql(
       `select id, (extract(epoch from published_at) * 1000) as published_ms,
               grade, tip, title, takeaway, summary, source, source_url, original_title, topics
-         from news_items ${where} ${orderBy} limit ${limit}`,
+         from news_items ${where} ${orderBy} limit ${limit} offset ${offset}`,
       params,
     );
     return { items: rows.map(mapRow), total };
@@ -332,7 +333,7 @@ export async function searchNews(
     }
     return b.publishedAt - a.publishedAt;
   });
-  return { items: matched.slice(0, limit), total: matched.length };
+  return { items: matched.slice(offset, offset + limit), total: matched.length };
 }
 
 export async function getNewsById(id: string): Promise<NewsItem | undefined> {
