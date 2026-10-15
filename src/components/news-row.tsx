@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { BookmarkButton } from "./bookmark-button";
 import { GradeBadge, TipBadge } from "./grade-badge";
 import { formatClock, formatKstLong, formatRelative } from "@/lib/news/time";
 import type { NewsItem } from "@/lib/news/types";
@@ -52,8 +53,11 @@ export function NewsRow({
         >
           {item.title}
         </Link>
-        <span className="ml-auto min-w-0 shrink truncate font-mono-ts text-[11px] text-muted/70">
-          {item.source} · {formatRelative(item.publishedAt, now)}
+        <span className="ml-auto flex min-w-0 shrink items-center gap-2">
+          <span className="truncate font-mono-ts text-[11px] text-muted/70">
+            {item.source} · {formatRelative(item.publishedAt, now)}
+          </span>
+          <BookmarkButton id={item.id} />
         </span>
       </div>
       <p className="mt-1 pl-0 text-[13px] leading-relaxed text-muted sm:pl-[76px]">
