@@ -137,6 +137,10 @@ export async function collectOnce(): Promise<CollectResult> {
       for (const item of existingItems) {
         sourceCounts.set(item.source, (sourceCounts.get(item.source) ?? 0) + 1);
       }
+      // P0-2: 컷오프는 분류 뒤로 이동. 후보를 넉넉히(최대 15건·소스당 최대 2건) 수집 → 전원 분류 → keep=true 중 상위 newCap건만 편입
+      const BATCH_MAX = 15;
+      const BATCH_SOURCE_CAP = 2;
+      const batchSourceCounts = new Map<string, number>();
       for (const e of entries) {
         if (existingUrls.has(e.sourceUrl)) {
           skipped += 1;
@@ -145,6 +149,12 @@ export async function collectOnce(): Promise<CollectResult> {
         // 소스별 캡 체크: 이미 6건 이상인 소스는 스킵
         const sourceCount = sourceCounts.get(e.source) ?? 0;
         if (sourceCount >= SOURCE_CAP) {
+          skipped += 1;
+          continue;
+        }
+        // 배치 내 소스당 최대 2건 — 고순위 소스(AI타임스 등)의 슬롯 독점 방지
+        const batchCount = batchSourceCounts.get(e.source) ?? 0;
+        if (batchCount >= BATCH_SOURCE_CAP) {
           skipped += 1;
           continue;
         }
@@ -162,12 +172,27 @@ export async function collectOnce(): Promise<CollectResult> {
         fresh.push(e);
         existingUrls.add(e.sourceUrl); // 같은 배치 내 중복 방지
         sourceCounts.set(e.source, sourceCount + 1);
-        if (fresh.length >= newCap) break;
+        batchSourceCounts.set(e.source, batchCount + 1);
+        if (fresh.length >= BATCH_MAX) break;
       }
+
+      // P0-1: summary가 빈 fresh 후보는 기사 본문 첫 ~500자를 발췌해 보강 (제목만 보고 keep=false 탈락 방지)
+      await Promise.all(
+        fresh.map(async (entry) => {
+          if (entry.summary && entry.summary.trim().length >= 40) return;
+          const lede = await fetchArticleLede(entry.sourceUrl);
+          if (lede) entry.summary = lede;
+        }),
+      );
 
       const classified = await Promise.all(fresh.map((entry) => classifyEntry(entry)));
       for (const payload of classified) {
         if (payload.keep === false) {
+          skipped += 1;
+          continue;
+        }
+        // P0-2: 분류 뒤 컷오프 — keep=true 중 상위 newCap건만 편입 (entries는 byDeskPriority 정렬 순서 유지)
+        if (inserted >= newCap) {
           skipped += 1;
           continue;
         }
@@ -233,6 +258,30 @@ type RawEntry = {
   summary: string;
   titleMustMatch?: boolean;
 };
+
+/** P0-1: RSS에 description이 없는 기사는 본문 첫 ~500자를 발췌 (제목만 보고 탈락 방지). 실패 시 "" 반환. */
+async function fetchArticleLede(url: string): Promise<string> {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "brief-news-collector/1.0 (+https://brief.news)",
+        Accept: "text/html",
+      },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) return "";
+    const html = await res.text();
+    const text = html
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return text.slice(0, 500);
+  } catch {
+    return "";
+  }
+}
 
 function keepEntry(e: RawEntry): boolean {
   if (SKIP_HINT.test(e.title) || SKIP_HINT.test(e.summary)) return false;
