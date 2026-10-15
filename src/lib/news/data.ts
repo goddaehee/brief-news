@@ -676,19 +676,29 @@ export function realFeedItems(items: NewsItem[]): NewsItem[] {
 export function filterItems(
   items: NewsItem[],
   key: "all" | "breaking" | "important" | "note" | "tip",
+  source = "all",
 ): NewsItem[] {
+  const bySource = source === "all" ? items : items.filter((i) => i.source === source);
   switch (key) {
     case "breaking":
-      return items.filter((i) => i.grade === "breaking");
+      return bySource.filter((i) => i.grade === "breaking");
     case "important":
-      return items.filter((i) => i.grade === "important");
+      return bySource.filter((i) => i.grade === "important");
     case "note":
-      return items.filter((i) => i.grade === "note");
+      return bySource.filter((i) => i.grade === "note");
     case "tip":
-      return items.filter((i) => i.tip);
+      return bySource.filter((i) => i.tip);
     default:
-      return items;
+      return bySource;
   }
+}
+
+export function sourceCounts(items: NewsItem[]): { source: string; count: number }[] {
+  const map = new Map<string, number>();
+  for (const i of items) map.set(i.source, (map.get(i.source) ?? 0) + 1);
+  return [...map.entries()]
+    .map(([source, count]) => ({ source, count }))
+    .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source, "ko"));
 }
 
 export function counts(items: NewsItem[]) {
