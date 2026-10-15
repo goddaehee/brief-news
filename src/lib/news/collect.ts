@@ -337,6 +337,20 @@ function normalizeProductNames(s: string): string {
   return out;
 }
 
+// 표시 정규화: 고유명사 오타·표기 변형을 표준 표기로 (화면 표시용)
+// normalizeProductNames()는 중복 비교용(전부 영문 통일)이고,
+// 이건 표시 텍스트에 직접 적용 — 오타가 피드에 그대로 노출되는 것을 방지.
+// 17차 P0: X @Reuters 신규 기사의 "앤스로픽" 오타 재유입 대응.
+const DISPLAY_NAME_MAP: [RegExp, string][] = [
+  [/앤스로픽/gi, "앤트로픽"],
+];
+
+function normalizeDisplayNames(s: string): string {
+  let out = s;
+  for (const [re, rep] of DISPLAY_NAME_MAP) out = out.replace(re, rep);
+  return out;
+}
+
 function tooSimilar(a: string, b: string, da?: number, db?: number): boolean {
   const fa = foldTitle(a);
   const fb = foldTitle(b);
@@ -727,6 +741,12 @@ export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted
       skipped += 1;
       continue;
     }
+    // P0-1 (17차): 표시 정규화 — 외래 고유명사 오타를 표준 표기로 통일 (앤스로픽 → 앤트로픽).
+    // 중복 비교 전에 적용하면 오타 변형도 같은 기사로 잡히고, 피드에도 오타가 노출되지 않음.
+    item.title = normalizeDisplayNames(item.title);
+    if (item.takeaway) item.takeaway = normalizeDisplayNames(item.takeaway);
+    if (item.summary) item.summary = normalizeDisplayNames(item.summary);
+    if (item.originalTitle) item.originalTitle = normalizeDisplayNames(item.originalTitle);
     if (existingUrls.has(item.sourceUrl)) {
       skipped += 1;
       continue;
