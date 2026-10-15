@@ -15,10 +15,18 @@ export function FilterBar({
   value,
   counts,
   onChange,
+  sourceValue,
+  sources,
+  totalCount,
+  onSourceChange,
 }: {
   value: FilterKey;
   counts: Record<FilterKey, number>;
   onChange: (k: FilterKey) => void;
+  sourceValue: string;
+  sources: { source: string; count: number }[];
+  totalCount: number;
+  onSourceChange: (s: string) => void;
 }) {
   return (
     <nav
@@ -45,6 +53,31 @@ export function FilterBar({
           </button>
         );
       })}
+      <span className="mx-1 self-center text-muted/40" aria-hidden="true">
+        |
+      </span>
+      <label className="sr-only" htmlFor="source-filter">
+        소스 필터
+      </label>
+      <select
+        id="source-filter"
+        aria-label="소스 필터"
+        value={sourceValue}
+        onChange={(e) => onSourceChange(e.target.value)}
+        className={cn(
+          "shrink-0 self-center rounded-full border border-line bg-transparent px-3 py-1 font-mono-ts text-xs transition-colors",
+          sourceValue === "all"
+            ? "text-muted hover:text-fg"
+            : "border-accent/60 text-accent",
+        )}
+      >
+        <option value="all">전체 소스 ({totalCount})</option>
+        {sources.map(({ source, count }) => (
+          <option key={source} value={source}>
+            {source} ({count})
+          </option>
+        ))}
+      </select>
     </nav>
   );
 }
