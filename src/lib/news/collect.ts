@@ -23,7 +23,7 @@ import {
   updateItem,
   upsertBriefing,
 } from "./repo";
-import type { CollectResult, IngestPayload } from "./types";
+import type { CollectResult, IngestPayload, NewsItem } from "./types";
 
 const AI_HINT =
   /\b(ai|a\.i\.|llm|gpt-?\d*|chatgpt|claude|gemini|grok|openai|anthropic|xai|nvidia|hbm|gpu|agent|인공지능|생성형|챗봇|딥러닝|에이전트|언어\s*모델|파운데이션\s*모델)\b/i;
@@ -123,6 +123,8 @@ export async function collectOnce(): Promise<CollectResult> {
         rewriteStale(existing),
         pullRss(),
       ]);
+      // rewriteStale이 삭제/업데이트했을 수 있으므로 최신 피드로 다시 조회 후 중복 정리 (P2)
+      const deduped = await dedupeExisting(await listNews());
       fetched = entries.length;
       const fresh: RawEntry[] = [];
       const newCap = rewritten > 0 ? Math.min(3, COLLECT_MAX_NEW) : COLLECT_MAX_NEW;
@@ -174,11 +176,11 @@ export async function collectOnce(): Promise<CollectResult> {
         else skipped += 1;
       }
 
-      if (inserted > 0 || rewritten > 0) await refreshBriefing();
+      if (inserted > 0 || rewritten > 0 || deduped > 0) await refreshBriefing();
 
       const note =
-        inserted > 0 || rewritten > 0
-          ? `RSS ${fetched}건 중 ${inserted}건 편성${rewritten ? ` · ${rewritten}건 재작성` : ""}${resolveLlm() ? "" : " · LLM 키 없음(원문 폴백)"}`
+        inserted > 0 || rewritten > 0 || deduped > 0
+          ? `RSS ${fetched}건 중 ${inserted}건 편성${rewritten ? ` · ${rewritten}건 재작성` : ""}${deduped ? ` · ${deduped}건 중복 정리` : ""}${resolveLlm() ? "" : " · LLM 키 없음(원문 폴백)"}`
           : fetched === 0
             ? "RSS를 가져오지 못했습니다. 네트워크 또는 피드 주소를 확인하세요."
             : "새 소식이 없거나 모두 중복입니다.";
@@ -428,6 +430,176 @@ async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>): Pro
     }),
   );
   return results.reduce((a, b) => a + b, 0);
+}
+
+// ============ dedupeExisting (P2): 기존 피드 중복 정리 ============
+// 수집 시점 tooSimilar는 신규 입고분에만 동작하므로, 기존-기존 쌍은
+// 여기서 잡는다. rewriteStale 다음에 collect 트랜잭션 안에서 실행.
+// 안전장치: run당 최대 DEDUPE_DELETE_CAP건 삭제, 초과분은 다음 run으로.
+const DEDUPE_DELETE_CAP = 3;
+
+/** 등급 점수: [속보] > [중요] > [참고] > [팁] (4자 패널 합의) */
+function gradeRank(i: Pick<NewsItem, "grade" | "tip">): number {
+  if (i.grade === "breaking") return 30;
+  if (i.grade === "important") return 20;
+  return i.tip ? 0 : 10; // [참고] 10 > [팁] 0
+}
+
+/**
+ * 클러스터 내 순위 점수 (높을수록 유지):
+ * 등급 → 품질(needsRewrite 통과) → 신선도(publishedAt 최신)
+ */
+function rankScore(i: NewsItem): number {
+  return (
+    gradeRank(i) * 1e12 -
+    (needsRewrite(i) ? 1e9 : 0) +
+    Math.min(i.publishedAt, 9999999999999)
+  );
+}
+
+function pickWinner(cluster: NewsItem[]): NewsItem {
+  return [...cluster].sort((a, b) => rankScore(b) - rankScore(a))[0];
+}
+
+// 지역/범위 스코프 키워드: 두 제목의 스코프가 다르면 다른 소식이다.
+// 예: "동남아 에이전틱 AI 진출" vs "아태 5개국 스마트시티 진출" → 각도 다름 → 둘 다 유지
+const SCOPE_KEYWORDS = [
+  "동남아",
+  "동남아시아",
+  "아태",
+  "아시아태평양",
+  "아시아",
+  "북미",
+  "남미",
+  "미국",
+  "중국",
+  "일본",
+  "유럽",
+  "영국",
+  "독일",
+  "프랑스",
+  "인도",
+  "중동",
+  "아프리카",
+  "오세아니아",
+  "국내",
+  "해외",
+  "글로벌",
+];
+const SCOPE_COUNT_HINT = /\d+\s*개(국|사|곳)/;
+
+function scopeSet(title: string): Set<string> {
+  const norm = normalizeProductNames(title).toLowerCase();
+  const found = new Set<string>();
+  for (const k of SCOPE_KEYWORDS) if (norm.includes(k)) found.add(k);
+  const m = norm.match(SCOPE_COUNT_HINT);
+  if (m) found.add(m[0].replace(/\s+/g, ""));
+  return found;
+}
+
+/** 두 제목의 스코프가 같은가? 다르면 다른 각도 → 삭제 대상에서 제외 */
+function sameScope(a: string, b: string): boolean {
+  const sa = scopeSet(a);
+  const sb = scopeSet(b);
+  if (sa.size === 0 && sb.size === 0) return true; // 스코프 언급 없으면 같은 소식으로 간주
+  if (sa.size !== sb.size) return false;
+  for (const s of sa) if (!sb.has(s)) return false;
+  return true;
+}
+
+/** 수집 시점과 동일한 판정 (제목+원문 대칭 비교). 중복이면 사유 문자열 반환. */
+function dupPairReason(a: NewsItem, b: NewsItem): string | null {
+  const pairs: [string, string][] = [
+    [a.title, b.title],
+    [a.originalTitle, b.title],
+    [a.title, b.originalTitle],
+  ];
+  let similar = false;
+  for (const [x, y] of pairs) {
+    if (tooSimilar(x, y, a.publishedAt, b.publishedAt)) {
+      similar = true;
+      break;
+    }
+  }
+  if (!similar) return null;
+  // 로그용 사유 분류
+  const fx = foldTitle(a.title);
+  const fy = foldTitle(b.title);
+  if (fx && fy) {
+    if (fx === fy) return "fold일치";
+    if (fx.length >= 12 && fy.length >= 12 && (fx.includes(fy) || fy.includes(fx)))
+      return "fold포함";
+  }
+  if (sharesTopicAnchor(a.title, b.title, a.publishedAt, b.publishedAt))
+    return "주제앵커(고유명사 2개+)";
+  return "토큰겹침";
+}
+
+async function dedupeExisting(existing: NewsItem[]): Promise<number> {
+  const items = existing.filter((i) => !isSeedItem(i));
+  if (items.length < 2) return 0;
+
+  // Union-Find로 중복 클러스터 탐지
+  const parent = new Map<string, string>();
+  const find = (x: string): string => {
+    const p = parent.get(x) ?? x;
+    if (p === x) return x;
+    const r = find(p);
+    parent.set(x, r);
+    return r;
+  };
+  const union = (a: string, b: string) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+
+  for (let x = 0; x < items.length; x++) {
+    for (let y = x + 1; y < items.length; y++) {
+      const a = items[x];
+      const b = items[y];
+      const reason = dupPairReason(a, b);
+      if (!reason) continue;
+      // 소프트 중복(같은 발표·다른 각도)은 삭제 대상에서 제외
+      if (!sameScope(a.title, b.title)) {
+        console.log(
+          `[dedupe] 스코프 다름 → 유지: "${a.title.slice(0, 36)}" / "${b.title.slice(0, 36)}" (${reason})`,
+        );
+        continue;
+      }
+      union(a.id, b.id);
+    }
+  }
+
+  const clusters = new Map<string, NewsItem[]>();
+  for (const i of items) {
+    const r = find(i.id);
+    if (!clusters.has(r)) clusters.set(r, []);
+    clusters.get(r)!.push(i);
+  }
+
+  let deleted = 0;
+  const ordered = [...clusters.values()]
+    .filter((c) => c.length > 1)
+    .sort((p, q) => q.length - p.length || p[0].id.localeCompare(q[0].id));
+
+  for (const cluster of ordered) {
+    if (deleted >= DEDUPE_DELETE_CAP) break;
+    const winner = pickWinner(cluster);
+    const losers = cluster
+      .filter((i) => i.id !== winner.id)
+      .sort((p, q) => rankScore(p) - rankScore(q)); // 점수 낮은(버릴) 순
+    for (const loser of losers) {
+      if (deleted >= DEDUPE_DELETE_CAP) break;
+      const reason = dupPairReason(loser, winner) ?? "중복";
+      const ok = await deleteItem(loser.id);
+      console.log(
+        `[dedupe] 삭제 "${loser.title.slice(0, 40)}" (id=${loser.id}) ← 유지 "${winner.title.slice(0, 40)}" (id=${winner.id}) [${reason}]${ok ? "" : " [삭제실패]"}`,
+      );
+      if (ok) deleted += 1;
+    }
+  }
+  return deleted;
 }
 
 async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
