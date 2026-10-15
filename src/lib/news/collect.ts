@@ -30,6 +30,32 @@ const AI_HINT =
 const SKIP_HINT =
   /장내매수|최대주주|액면병합|변경상장|유상증자|무상증자|주식\s*취득|임원\s*변동|거래정지|시간외|배당\s*공시|youtube|youtu\.be|노트북 후보|특징주|테마주|급등주|상한가|하한가|공시\b|거주 세계|자사주|만찬|국빈|시상식|포토\s*뉴스|오늘의 인물/i;
 
+/**
+ * 벤더 블로그(OpenAI/Google/NVIDIA 등)의 고객 사례(customer story)는 PR이므로 수집에서 제외.
+ * 예: "Amp puts AI agents to work beyond code with OpenAI models" (출처: OpenAI)
+ *     "SentinelOne cuts malware analysis from weeks to hours" (본문에 "With OpenAI Daybreak")
+ * 이런 글은 헤드라인의 주어가 타사인데 출처가 벤더라 독자를 혼란스럽게 한다.
+ * (12차 평가: 출처 라벨 오류 1건→2건 확산의 실제 원인 — 매핑 버그가 아니라 고객 사례 유입)
+ */
+const VENDOR_BLOG_SOURCES = new Set([
+  "OpenAI",
+  "Google AI",
+  "Google DeepMind",
+  "NVIDIA",
+  "Hugging Face",
+]);
+/** "How [기업] ..." — 고객 사례의 전형적인 제목 형식 (단, "How we ..."는 자사 글이므로 제외) */
+const CUSTOMER_STORY_TITLE_HINT = /^how\s+(?!we\b)[a-z0-9]/i;
+/** "with OpenAI models", "With OpenAI Daybreak", "using ChatGPT API" — 타사 주어 + 자사 제품 언급 */
+const VENDOR_PRODUCT_HINT =
+  /\b(with|using|built\s+with|powered\s+by)\s+(openai|chatgpt|gpt-?\d*|codex|gemini|deepmind|nvidia)\s+(models?|technology|api|platform|daybreak)\b/i;
+
+function isVendorCustomerStory(e: RawEntry): boolean {
+  if (!VENDOR_BLOG_SOURCES.has(e.source)) return false;
+  const text = `${e.title} ${e.summary}`;
+  return CUSTOMER_STORY_TITLE_HINT.test(text) || VENDOR_PRODUCT_HINT.test(text);
+}
+
 function lockOwner(): string {
   return `brief-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -101,9 +127,11 @@ export async function collectOnce(): Promise<CollectResult> {
         }
         if (
           existingItems.some(
-            (i) => tooSimilar(i.title, e.title) || tooSimilar(i.originalTitle, e.title),
+            (i) =>
+              tooSimilar(i.title, e.title, i.publishedAt, e.date) ||
+              tooSimilar(i.originalTitle, e.title, i.publishedAt, e.date),
           ) ||
-          fresh.some((f) => tooSimilar(f.title, e.title))
+          fresh.some((f) => tooSimilar(f.title, e.title, f.date, e.date))
         ) {
           skipped += 1;
           continue;
@@ -185,6 +213,7 @@ type RawEntry = {
 
 function keepEntry(e: RawEntry): boolean {
   if (SKIP_HINT.test(e.title) || SKIP_HINT.test(e.summary)) return false;
+  if (isVendorCustomerStory(e)) return false;
   const target = e.titleMustMatch ? e.title : `${e.title} ${e.summary}`;
   return AI_HINT.test(target);
 }
@@ -285,25 +314,73 @@ function normalizeProductNames(s: string): string {
   return out;
 }
 
-function tooSimilar(a: string, b: string): boolean {
+function tooSimilar(a: string, b: string, da?: number, db?: number): boolean {
   const fa = foldTitle(a);
   const fb = foldTitle(b);
   if (!fa || !fb) return false;
   if (fa === fb) return true;
   if (fa.length >= 12 && fb.length >= 12 && (fa.includes(fb) || fb.includes(fa))) return true;
+  // 주제 앵커 규칙 (P1): 핵심 고유명사 2개 이상 공유 → 같은 사건
+  if (sharesTopicAnchor(a, b, da, db)) return true;
   // 같은 사건을 다르게 쓴 제목: 핵심 토큰 겹침으로 잡는다.
-  const ta = new Set(
-    a.toLowerCase().replace(/[^0-9a-z\uAC00-\uD7A3]+/gi, " ").split(" ").filter((t) => t.length >= 2),
-  );
-  const tb = new Set(
-    b.toLowerCase().replace(/[^0-9a-z\uAC00-\uD7A3]+/gi, " ").split(" ").filter((t) => t.length >= 2),
-  );
+  // 토큰 단계에도 정규화 적용 (P1): "앤스로픽/앤트로픽" 같은 표기 변형 흡수
+  const tokens = (s: string) =>
+    new Set(
+      normalizeProductNames(s)
+        .toLowerCase()
+        .replace(/[^0-9a-z\uAC00-\uD7A3]+/gi, " ")
+        .split(" ")
+        .filter((t) => t.length >= 2),
+    );
+  const ta = tokens(a);
+  const tb = tokens(b);
   if (ta.size >= 3 && tb.size >= 3) {
     let inter = 0;
     for (const t of ta) if (tb.has(t)) inter += 1;
     if (inter >= 3 && inter / Math.min(ta.size, tb.size) >= 0.6) return true;
   }
   return false;
+}
+
+// 앵커 불용어: 일반 명사·보도 상투어는 고유명사가 아니므로 앵커에서 제외.
+// 오탐 사례: "삼성전자, 차세대 AI 반도체 HBM4 양산 돌입" vs
+// "SK하이닉스, AI 서버용 HBM4 출하 확대" → "ai"+"hbm" 2개로 오탐.
+const ANCHOR_STOPWORDS = new Set([
+  // 영문 도메인 일반어
+  "ai", "hbm", "llm", "gpu", "npu", "api", "sdk", "it", "os", "pc",
+  "vr", "ar", "xr", "cloud", "data", "edge", "agent", "chat", "bot",
+  // 한글 도메인 일반어
+  "모델", "기술", "개발", "반도체", "서버", "데이터", "학습", "추론",
+  "플랫폼", "서비스", "솔루션", "시스템", "시장", "산업", "국내", "글로벌",
+  "차세대", "신규", "최신", "대형", "소형",
+  // 보도 상투어 (행위·상태)
+  "출시", "발표", "공개", "진출", "확대", "돌입", "양산", "출하", "도입",
+  "적용", "지원", "선정", "추진", "강화", "협력", "인수", "투자", "출범",
+  "개최", "개시",
+]);
+
+// 주제 앵커 규칙 (P1): 정규화된 고유명사 토큰(영문 2자+, 한글 2자+) 중
+// 양쪽 모두에 등장하는 앵커가 2개 이상이면 같은 사건으로 간주.
+// ("카카오 FDE" vs "카카오 카나나"는 공유 앵커 1개라 안전)
+// 불용어 제외 + 공통 앵커 중 최소 1개는 영문 고유명사여야 오탐 방지.
+// pubDate 차이가 72시간을 넘으면 후속 보도로 보고 비교 제외.
+function sharesTopicAnchor(a: string, b: string, da?: number, db?: number): boolean {
+  if (da != null && db != null && Math.abs(da - db) > 72 * 3600 * 1000) return false;
+  const anchors = (s: string): Set<string> => {
+    const raw = normalizeProductNames(s).toLowerCase().match(/[a-z]{2,}|[\uAC00-\uD7A3]{2,}/g) ?? [];
+    // 한글 조사 탈락 (카카오가 → 카카오) + 불용어 제외
+    return new Set(
+      raw
+        .map((t) => t.replace(/(에서|으로|에게|부터|까지|처럼|보다|은|는|이|가|을|를|의|에|와|과|도|만|로)$/, ""))
+        .filter((t) => t.length >= 2 && !ANCHOR_STOPWORDS.has(t)),
+    );
+  };
+  const A = anchors(a);
+  const B = anchors(b);
+  const common = [...A].filter((t) => B.has(t));
+  if (common.length < 2) return false;
+  // 일반 명사 2개가 앵커를 채우는 오탐 방지: 최소 1개는 영문 고유명사(회사·제품명)
+  return common.some((t) => /^[a-z]+$/.test(t));
 }
 
 async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>): Promise<number> {
@@ -445,6 +522,11 @@ async function refreshBriefing() {
 
 export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted: number; skipped: number }> {
   await ensureSeeded();
+  // P0: RSS 수집 경로와 동일한 중복 검사. X 보충 수집이 볼륨을 키우기 전 구멍 봉쇄.
+  // (X 배치는 건수가 적어 전체 조회 부담이 작다)
+  const existingItems = (await listNews()).filter((i) => !isSeedItem(i));
+  const existingUrls = new Set(existingItems.map((i) => i.sourceUrl));
+  const batch: IngestPayload[] = [];
   let inserted = 0;
   let skipped = 0;
   for (const item of items.slice(0, INGEST_MAX_BATCH)) {
@@ -452,6 +534,23 @@ export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted
       skipped += 1;
       continue;
     }
+    if (existingUrls.has(item.sourceUrl)) {
+      skipped += 1;
+      continue;
+    }
+    if (
+      existingItems.some(
+        (i) =>
+          tooSimilar(i.title, item.title, i.publishedAt, item.publishedAt) ||
+          tooSimilar(i.originalTitle, item.title, i.publishedAt, item.publishedAt),
+      ) ||
+      batch.some((f) => tooSimilar(f.title, item.title, f.publishedAt, item.publishedAt))
+    ) {
+      skipped += 1;
+      continue;
+    }
+    batch.push(item);
+    existingUrls.add(item.sourceUrl);
     const ok = await insertItem(item);
     if (ok) inserted += 1;
     else skipped += 1;
