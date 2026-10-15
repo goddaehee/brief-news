@@ -42,8 +42,11 @@ export async function GET(request: Request) {
       ? Math.min(Math.max(Math.floor(limitRaw), 1), 50)
       : 20;
 
-    const { items, total } = await searchNews(q, { grade, sort, limit });
-    return Response.json({ items, total, q });
+    const offsetRaw = Number(url.searchParams.get("offset") ?? 0);
+    const offset = Number.isFinite(offsetRaw) ? Math.max(Math.floor(offsetRaw), 0) : 0;
+
+    const { items, total } = await searchNews(q, { grade, sort, limit, offset });
+    return Response.json({ items, total, q, offset });
   } catch (err) {
     console.error("[api/search] failed:", err instanceof Error ? err.message : err);
     return Response.json({ error: "검색 중 오류가 발생했습니다." }, { status: 500 });
