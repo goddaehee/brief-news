@@ -264,6 +264,77 @@ export async function listNews(): Promise<NewsItem[]> {
   return [...mem().items.values()].sort((a, b) => b.publishedAt - a.publishedAt);
 }
 
+export type SearchSort = "new" | "relevant";
+
+export async function searchNews(
+  q: string,
+  opts: { grade?: string; sort?: SearchSort; limit?: number } = {},
+): Promise<{ items: NewsItem[]; total: number }> {
+  const grade = opts.grade ?? "all";
+  const sort: SearchSort = opts.sort ?? "new";
+  const limit = Math.min(Math.max(opts.limit ?? 20, 1), 50);
+  // ILIKE 특수문자 이스케이프: %, _, \ 를 리터럴로 취급
+  const like = `%${q.replace(/[%_\\]/g, (c) => `\\${c}`)}%`;
+  const matchFields = (i: NewsItem) => {
+    const ql = q.toLowerCase();
+    return (
+      i.title.toLowerCase().includes(ql) ||
+      i.takeaway.toLowerCase().includes(ql) ||
+      i.summary.toLowerCase().includes(ql)
+    );
+  };
+  const matchGrade = (i: NewsItem) => {
+    if (grade === "tip") return i.tip;
+    if (grade === "all") return true;
+    return i.grade === grade;
+  };
+  const relevanceScore = (i: NewsItem) => {
+    const ql = q.toLowerCase();
+    if (i.title.toLowerCase().includes(ql)) return 2;
+    if (i.takeaway.toLowerCase().includes(ql)) return 1;
+    return 0;
+  };
+
+  await ensureSchema();
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    const conditions: string[] = [
+      `(title ilike $1 escape '\\' or takeaway ilike $1 escape '\\' or summary ilike $1 escape '\\')`,
+    ];
+    const params: unknown[] = [like];
+    if (grade === "tip") {
+      conditions.push(`tip = true`);
+    } else if (grade !== "all") {
+      conditions.push(`grade = $${params.length + 1}`);
+      params.push(grade);
+    }
+    const where = `where ${conditions.join(" and ")}`;
+    const countRows = await sql(`select count(*) as n from news_items ${where}`, params);
+    const total = Number(countRows[0]?.n ?? 0);
+    const orderBy =
+      sort === "relevant"
+        ? `order by case when title ilike $1 escape '\\' then 0 when takeaway ilike $1 escape '\\' then 1 else 2 end, published_at desc`
+        : `order by published_at desc`;
+    const rows = await sql(
+      `select id, (extract(epoch from published_at) * 1000) as published_ms,
+              grade, tip, title, takeaway, summary, source, source_url, original_title, topics
+         from news_items ${where} ${orderBy} limit ${limit}`,
+      params,
+    );
+    return { items: rows.map(mapRow), total };
+  }
+
+  const matched = [...mem().items.values()].filter((i) => matchGrade(i) && matchFields(i));
+  matched.sort((a, b) => {
+    if (sort === "relevant") {
+      const diff = relevanceScore(b) - relevanceScore(a);
+      if (diff !== 0) return diff;
+    }
+    return b.publishedAt - a.publishedAt;
+  });
+  return { items: matched.slice(0, limit), total: matched.length };
+}
+
 export async function getNewsById(id: string): Promise<NewsItem | undefined> {
   await ensureSchema();
   if (hasDatabaseUrl()) {
