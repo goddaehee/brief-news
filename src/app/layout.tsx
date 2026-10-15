@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { JetBrains_Mono, Noto_Sans_KR } from "next/font/google";
 import { Toaster } from "sonner";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
+import { SearchOverlay } from "@/components/search-overlay";
 import "./globals.css";
 
 const sans = Noto_Sans_KR({
@@ -71,6 +72,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body className="min-h-full bg-bg font-sans text-fg">
         <PreviewHostBridge />
         {children}
+        <SearchOverlay />
         <Toaster
           theme="dark"
           position="bottom-center"
