@@ -23,7 +23,10 @@ export default function SavedPage() {
   }, []);
 
   useEffect(() => {
-    const ids = Object.keys(bookmarks);
+    // 최신 저장 순으로 정렬 (timestamp 내림차순)
+    const ids = Object.entries(bookmarks)
+      .sort((a, b) => b[1] - a[1])
+      .map(([id]) => id);
     if (ids.length === 0) {
       setItems([]);
       setLoading(false);
