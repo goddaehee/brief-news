@@ -77,7 +77,7 @@ export function parseNewsMarkdown(raw: string): IngestPayload {
   const takeaway = (parts[0] ?? "").replace(/^#\s+.+\n*/, "").trim();
   const summary = (parts[1] ?? takeaway).trim();
   const published = fm.published || fm.published_at || fm.date;
-  const publishedAt = published ? Date.parse(published) : undefined;
+  const publishedAt = published ? parseFeedDate(published) : undefined;
 
   const title = (fm.title || "").trim();
   const sourceUrl = (fm.source_url || fm.url || "").trim();
@@ -94,7 +94,7 @@ export function parseNewsMarkdown(raw: string): IngestPayload {
     grade: asGrade(fm.grade),
     tip: asBool(fm.tip),
     topics: asTopics(fm.topics),
-    publishedAt: Number.isFinite(publishedAt) ? publishedAt : undefined,
+    publishedAt: publishedAt !== undefined ? publishedAt : undefined,
   };
 }
 
@@ -157,6 +157,36 @@ function tag(chunk: string, name: string): string {
   return plain?.[1] ? decodeXml(plain[1]) : "";
 }
 
+/**
+ * 피드 날짜 파싱. 국내 피드 중 pubDate에 타임존 오프셋이 없는 경우가 있음
+ * (예: "2026-10-14 09:28:26"). Date.parse는 오프셋 없는 날짜를 UTC로 해석해서
+ * 9시간 미래로 저장되는 버그 발생. 오프셋이 없으면 KST(+09:00)로 간주.
+ */
+function parseFeedDate(dateRaw: string): number | undefined {
+  const s = dateRaw.trim();
+  if (!s) return undefined;
+
+  // 오프셋 표기 감지: Z, +09:00, +0900, GMT, UTC 등
+  const hasOffset = /([zZ]|[+-]\d{2}:?\d{2}|[+-]\d{4}|\b(GMT|UTC|UT|KST)\b)\s*$/i.test(s);
+
+  let normalized = s;
+  if (!hasOffset) {
+    // "2026-10-14 09:28:26" → "2026-10-14T09:28:26+09:00"
+    normalized = s.replace(" ", "T");
+    if (/T\d{2}:\d{2}/.test(normalized)) {
+      normalized += "+09:00";
+    } else if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+      normalized += "T00:00:00+09:00";
+    } else {
+      // 인식 불가 포맷은 그대로 두어 Date.parse에 맡김
+      normalized = s;
+    }
+  }
+
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 export type RssEntry = {
   title: string;
   link: string;
@@ -181,11 +211,11 @@ export function parseFeedXml(xml: string, fallbackSource: string): RssEntry[] {
     if (!title || !link) continue;
     const dateRaw =
       tag(chunk, "pubDate") || tag(chunk, "published") || tag(chunk, "updated") || "";
-    let parsed = Date.parse(dateRaw);
+    let parsed = parseFeedDate(dateRaw);
     // 타임존 오표기 수정: 일부 국내 소스(디일렉 등)가 KST 시간을 GMT로 잘못 표기함
     // 예: "14:46 GMT"가 실제로는 14:46 KST → 변환 시 23:46 KST(미래)가 됨
     // 파싱 결과가 현재보다 1시간 이상 미래면, 9시간 빼서 KST로 보정
-    if (Number.isFinite(parsed) && parsed > Date.now() + 3600_000) {
+    if (parsed !== undefined && parsed > Date.now() + 3600_000) {
       parsed -= 9 * 3600_000;
     }
     const summary =
@@ -195,7 +225,7 @@ export function parseFeedXml(xml: string, fallbackSource: string): RssEntry[] {
     entries.push({
       title,
       link: link.trim(),
-      date: Number.isFinite(parsed) ? parsed : fallbackDate,
+      date: parsed !== undefined ? parsed : fallbackDate,
       summary: summary.slice(0, 800),
     });
     if (entries.length >= 20) break;
