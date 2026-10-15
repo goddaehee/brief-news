@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { BookmarkButton } from "@/components/bookmark-button";
 import { GradeBadge, TipBadge, gradeColor } from "@/components/grade-badge";
 import { NotifyButton } from "@/components/notify-button";
 import { Ticker } from "@/components/ticker";
@@ -83,6 +84,9 @@ export default async function ItemPage({ params }: { params: Promise<{ id: strin
           <time dateTime={new Date(item.publishedAt).toISOString()}>
             {formatKstLong(item.publishedAt)}
           </time>
+          <span className="ml-auto">
+            <BookmarkButton id={item.id} />
+          </span>
         </div>
         <h1 className="mt-4 text-2xl font-bold leading-snug text-head text-balance sm:text-3xl">
           {item.title}
