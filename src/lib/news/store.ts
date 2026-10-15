@@ -3,12 +3,23 @@ import type { FilterKey, Reaction } from "./types";
 
 const REACT_KEY = "brief-reactions";
 const NOTIFY_KEY = "brief-notify";
+const BOOKMARK_KEY = "brief-bookmarks";
 
 function readReactions(): Record<string, Reaction> {
   if (typeof window === "undefined") return {};
   try {
     const raw = localStorage.getItem(REACT_KEY);
     return raw ? (JSON.parse(raw) as Record<string, Reaction>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function readBookmarks(): Record<string, number> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(BOOKMARK_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, number>) : {};
   } catch {
     return {};
   }
@@ -25,12 +36,17 @@ type FeedState = {
   visible: number;
   notify: boolean;
   reactions: Record<string, Reaction>;
+  bookmarks: Record<string, number>;
+  searchOpen: boolean;
   setFilter: (k: FilterKey) => void;
   setFocused: (n: number) => void;
   loadMore: () => void;
   resetVisible: () => void;
   toggleNotify: () => boolean;
   setReaction: (id: string, r: Reaction) => void;
+  toggleBookmark: (id: string) => void;
+  isBookmarked: (id: string) => boolean;
+  setSearchOpen: (open: boolean) => void;
 };
 
 export const PAGE = 20;
@@ -41,6 +57,8 @@ export const useFeed = create<FeedState>((set, get) => ({
   visible: PAGE,
   notify: false,
   reactions: {},
+  bookmarks: {},
+  searchOpen: false,
   setFilter: (filter) => set({ filter, focused: -1, visible: PAGE }),
   setFocused: (focused) => set({ focused }),
   loadMore: () => set({ visible: get().visible + PAGE }),
@@ -66,11 +84,29 @@ export const useFeed = create<FeedState>((set, get) => ({
     }
     set({ reactions: next });
   },
+  toggleBookmark: (id) => {
+    const prev = get().bookmarks;
+    const next = { ...prev };
+    if (next[id]) {
+      delete next[id];
+    } else {
+      next[id] = Date.now();
+    }
+    try {
+      localStorage.setItem(BOOKMARK_KEY, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
+    set({ bookmarks: next });
+  },
+  isBookmarked: (id) => Boolean(get().bookmarks[id]),
+  setSearchOpen: (searchOpen) => set({ searchOpen }),
 }));
 
 export function hydratePrefs() {
   useFeed.setState({
     notify: readNotify(),
     reactions: readReactions(),
+    bookmarks: readBookmarks(),
   });
 }
