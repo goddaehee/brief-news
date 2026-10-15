@@ -99,6 +99,9 @@ export function deskUser(entry: {
 {"keep":true,"title":"오픈AI, 주요 신제품 출시 다음 주로 연기","takeaway":"대형 신제품 일주일 연기. 다음 주 발표에 맞춰 도입 계획 조정 필요.","summary":"오픈AI가 신제품 공개를 다음 주로 미뤘다. 데브데이 일정과 맞춘다. 기존 도입 일정을 한 주 뒤로 밀 여지가 있다.","grade":"important","tip":false,"topics":["openai"]}
 {"keep":true,"title":"오픈AI, 'AI 정렬 실패' 사례 보고 체계 구축","takeaway":"모델 안전성·투명성 검증 절차 강화. 정렬 문제 대응 공론화에 대비 필요.","summary":"오픈AI가 정렬 실패 사례를 추적해 공개하는 보고 체계를 마련했다. 예상 밖 모델 행동을 조사 대상으로 올린다. 안전 거버넌스 논의가 제품 일정에 붙을 수 있다.","grade":"note","tip":false,"topics":["openai"]}
 {"keep":true,"title":"협업툴 '플로우', 챗GPT·클로드 공식 앱 입점","takeaway":"국내 협업툴에서 챗GPT·클로드를 기본 연동할 수 있게 됨. 기업 워크플로우 적용 검토.","summary":"플로우가 챗GPT와 클로드 공식 앱을 등록했다. 메신저 안에서 두 모델을 호출한다. 국산 협업툴 중 공식 입점은 처음이다.","grade":"note","tip":false,"topics":["korea-ai","agent"]}
+{"keep":true,"title":"오픈AI, API 장문 입력 요금 인하","takeaway":"장문 컨텍스트 호출 비용 부담 완화. 대량 문서 처리 워크로드라면 새 요금제 적용 시점 확인.","summary":"오픈AI가 API 장문 입력 요금을 인하했다. 128K 이상 구간 단가가 조정된다. 기존 배치 작업의 비용 재산정이 가능하다.","grade":"important","tip":false,"topics":["openai"]}
+{"keep":true,"title":"앤트로픽, 클로드 API 장애 복구","takeaway":"2시간 장애 후 정상화. 클로드 API 연동 서비스는 장애 시간대 요청 누락 여부 점검.","summary":"앤트로픽 클로드 API에서 2시간 장애가 발생했다. 상태 페이지에 공지됐다. 현재는 정상화됐다.","grade":"important","tip":false,"topics":["anthropic"]}
+{"keep":true,"title":"과기정통부, AI 기본법 시행령 입법예고","takeaway":"고영향 AI 의무 조항 세부 기준 공개. 해당 사업자는 의견 수렴 기간 내 적용 범위 주시.","summary":"과기정통부가 AI 기본법 시행령을 입법예고했다. 고영향 AI 판정 기준이 담겼다. 의견 수렴은 다음 달까지다.","grade":"note","tip":false,"topics":["korea-ai","regulation"]}
 {"keep":false,"title":"","takeaway":"","summary":"","grade":"note","tip":false,"topics":[]}
 
 JSON 스키마:
@@ -312,6 +315,12 @@ function looksTruncated(s: string): boolean {
   return TRUNCATED_HINT.test(s ?? "");
 }
 
+// HTML 엔티티 잔존 — 제목/시사점에 `&quot;`, `&amp;` 등이 그대로 노출된 경우.
+// 21차 P0: `&quot;` 4건이 46자 미만이라 재작성 큐에 안 들어감.
+// decodeEntities는 신규 유입에만 적용되므로 기존분은 재작성으로 정리.
+// decodeEntities가 처리하는 엔티티와 일치시킬 것 (&apos; 포함).
+const ENTITY_HINT = /&(quot|amp|apos|lt|gt|#\d+);/;
+
 export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summary" | "grade">): boolean {
   if (shouldDrop(item.title, item.summary)) return true;
   if (hangulLen(item.title) > 46) return true;
@@ -336,6 +345,8 @@ export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summar
   // 17차 P0: 단어 중간 절단 아티팩트("펌웨다.", "다다." 등)는 무조건 재작성
   // 20차: 제목도 검사 ("현실회" 같은 제목 음절 탈락)
   if (looksTruncated(item.title) || looksTruncated(takeaway) || looksTruncated(item.summary)) return true;
+  // 21차 P0: HTML 엔티티 잔존 — decodeEntities는 신규 유입에만 적용되므로 기존분은 재작성으로 정리
+  if (ENTITY_HINT.test(item.title) || ENTITY_HINT.test(item.takeaway)) return true;
   // 마지막 문장이 조사(에/의/를/을/가/이/와/과/로/에서/에게)로 끝나면 파편
   if (/(에|의|를|을|가|이|와|과|로|에서|에게|한테|보다|처럼)\.$/.test(takeaway)) return true;
   // 마지막 문장이 명사 단독으로 끝나면 파편 (예: "국산 챗봇.", "가격·성능.", "해당 지역.")
