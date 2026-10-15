@@ -25,8 +25,28 @@ const FRONTIER_EVENT =
   /출시|공개|발표|벤치마크|벤치|평가|1위|신기록|돌파|경신|98점|99점|100점|IPO|상장|매출|실적|장애|다운|단종|가격|인하|인상/i;
 
 function isFrontierEvent(title: string, takeaway: string): boolean {
-  const t = `${title} ${takeaway}`;
+  const t = `${title} ${factPart(takeaway)}`;
   return FRONTIER_LAB.test(t) && FRONTIER_EVENT.test(t) && !CEREMONY_GUARD.test(t);
+}
+
+/** 시사점의 "할 일" 문장을 제외한 사실 부분만 반환.
+ *  시사점 구조 "사실 한 줄. 할 일 한 줄."에서 할 일 문장은
+ *  "비교 권장", "확인 필요" 같은 권유형 상용구라 승격 신호로 부적합.
+ *  16차 결함: 에이수스("사양·가격 비교 권장"의 "가격"),
+ *  리퀴드AI("벤치마크 대상 후보로 확인 권장"의 "벤치마크") 오승격.
+ *  사실 문장의 신호(버셀 "커널 취약점")는 그대로 유지. */
+export function factPart(takeaway: string): string {
+  const t = takeaway.trim();
+  // "사실 한 줄. 할 일 한 줄." → 마지막 문장이 권유형 어미면 할 일 문장으로 보고 제외.
+  // 사실 문장은 명사형 종결("경쟁.", "확대.")도 허용되므로 문장 경계는 단순 ". " 기준.
+  const idx = t.lastIndexOf(". ");
+  if (idx > 0) {
+    const last = t.slice(idx + 2).trim();
+    if (last && /(필요|검토|권장|확인|점검)\.\s*$/.test(last)) {
+      return t.slice(0, idx + 1).trim();
+    }
+  }
+  return t;
 }
 
 export const LEAD_HINT = /마련했다|발표했다|밝혔다|나섰다|전했다|보도했다/;
@@ -244,7 +264,8 @@ export function polishTakeaway(raw: string): string {
 }
 
 export function polishGrade(grade: Grade, title: string, takeaway: string): Grade {
-  const t = `${title} ${takeaway}`;
+  // 16차: 승격 게이트는 제목 + 시사점 사실 부분만 본다 (할 일 상용구 오탐 방지)
+  const t = `${title} ${factPart(takeaway)}`;
   if (grade === "breaking" && !/장애|다운|중단|지연|가격|인하|인상/.test(t)) return "note";
   // 강등: LLM이 important로 매겼어도 힌트 미매치 → note
   // (15차 리뷰: 여기서 바로 return 하지 않고 아래 승격 검사로 흘려보낸다 — 힌트는 양방향 게이트)
@@ -271,12 +292,14 @@ export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summar
   if (LEAD_HINT.test(item.takeaway) && hangulLen(item.takeaway) > 55) return true;
   if (/해라|하라/.test(item.takeaway)) return true;
   if (/[A-Za-z]{4,}·[A-Za-z]{4,}/.test(item.takeaway)) return true;
-  if (item.grade === "important" && !IMPORTANT_HINT.test(`${item.title} ${item.takeaway}`)) return true;
+  // 16차: 힌트 검사는 시사점 사실 부분만 (할 일 상용구 오탐 방지).
+  // 프런티어 승격분(로봇팔 벤치, 베라 CPU 랙)도 힌트로 인정 — 매 수집마다 재작성 방지.
+  const ttw = `${item.title} ${factPart(item.takeaway)}`;
+  if (item.grade === "important" && !(IMPORTANT_HINT.test(ttw) || isFrontierEvent(item.title, item.takeaway))) return true;
   // 승격: [참고]인데 강한 중요 신호가 있으면 재작성 → polishGrade 승격 로직이 적용됨
   // (기존 [참고] 기사는 승격 로직 배포 전 분류분이라 재작성이 필요)
   // 15차 평가: 프런티어 이벤트도 승격 대상 ([중요] 커버리지)
   // (15차 리뷰: 의식/행사성 제외 가드는 isFrontierEvent 내부에만 — 리스크 경로는 막지 않는다)
-  const ttw = `${item.title} ${item.takeaway}`;
   if (item.grade === "note" && (IMPORTANT_HINT.test(ttw) || isFrontierEvent(item.title, item.takeaway)))
     return true;
   // 파편 시사점: 아티팩트 패턴이면 무조건 재작성 (길이 조건 제거 — Claude 발견: 파편은 짧아서 기존 조건에 안 걸림)
