@@ -44,3 +44,30 @@ export function useFeedHotkeys(items: NewsItem[]) {
     return () => window.removeEventListener("keydown", onKey);
   }, [focused, items, router, setFocused]);
 }
+
+// 검색 오버레이 단축키: Cmd/Ctrl+K 또는 `/` 로 열기.
+// 입력 필드에 포커스가 있을 때는 `/` 입력을 방해하지 않는다.
+export function useSearchHotkey() {
+  const setSearchOpen = useFeed((s) => s.setSearchOpen);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen(true);
+        return;
+      }
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "/") {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setSearchOpen]);
+}
