@@ -97,7 +97,7 @@ export function deskUser(entry: {
 
 예시(스타일만 복사, 내용 베끼지 말 것):
 {"keep":true,"title":"오픈AI, 주요 신제품 출시 다음 주로 연기","takeaway":"대형 신제품 일주일 연기. 다음 주 발표에 맞춰 도입 계획 조정 필요.","summary":"오픈AI가 신제품 공개를 다음 주로 미뤘다. 데브데이 일정과 맞춘다. 기존 도입 일정을 한 주 뒤로 밀 여지가 있다.","grade":"important","tip":false,"topics":["openai"]}
-{"keep":true,"title":"오픈AI, 'AI 정렬 실패' 사례 보고 체계 구축","takeaway":"모델 안전성·투명성 검증 절차 강화. 정렬 문제 대응이 공론화될 전망.","summary":"오픈AI가 정렬 실패 사례를 추적해 공개하는 보고 체계를 마련했다. 예상 밖 모델 행동을 조사 대상으로 올린다. 안전 거버넌스 논의가 제품 일정에 붙을 수 있다.","grade":"note","tip":false,"topics":["openai"]}
+{"keep":true,"title":"오픈AI, 'AI 정렬 실패' 사례 보고 체계 구축","takeaway":"모델 안전성·투명성 검증 절차 강화. 정렬 문제 대응 공론화에 대비 필요.","summary":"오픈AI가 정렬 실패 사례를 추적해 공개하는 보고 체계를 마련했다. 예상 밖 모델 행동을 조사 대상으로 올린다. 안전 거버넌스 논의가 제품 일정에 붙을 수 있다.","grade":"note","tip":false,"topics":["openai"]}
 {"keep":true,"title":"협업툴 '플로우', 챗GPT·클로드 공식 앱 입점","takeaway":"국내 협업툴에서 챗GPT·클로드를 기본 연동할 수 있게 됨. 기업 워크플로우 적용 검토.","summary":"플로우가 챗GPT와 클로드 공식 앱을 등록했다. 메신저 안에서 두 모델을 호출한다. 국산 협업툴 중 공식 입점은 처음이다.","grade":"note","tip":false,"topics":["korea-ai","agent"]}
 {"keep":false,"title":"","takeaway":"","summary":"","grade":"note","tip":false,"topics":[]}
 
@@ -125,8 +125,21 @@ function clipChars(s: string, max: number): string {
   return best.replace(/[,\s·]+$/g, "").trim();
 }
 
+// HTML 엔티티 디코딩 (GLM 출력/RSS에 &amp; &quot; 등이 그대로 남는 경우)
+// &amp;는 반드시 마지막에 디코딩 (이중 디코딩 방지: &amp;quot; → &quot; 리터럴 유지)
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&amp;/g, "&"); // &amp;는 마지막에
+}
+
 export function polishTitle(raw: string): string {
-  let t = raw
+  // decodeEntities가 만드는 " (straight quote)는 기존 [""]→' 규칙과 충돌 없음 (curly만 대상)
+  let t = decodeEntities(raw)
     .replace(/[“”]/g, "'")
     .replace(/[‘’]/g, "'")
     .replace(/…/g, "...")
@@ -138,7 +151,7 @@ export function polishTitle(raw: string): string {
 }
 
 export function polishTakeaway(raw: string): string {
-  let t = raw
+  let t = decodeEntities(raw)
     .replace(/[“”]/g, "'")
     .replace(/[‘’]/g, "'")
     .replace(/…/g, "...")
@@ -285,11 +298,15 @@ export function shouldDrop(title: string, summary: string): boolean {
   return DROP_HINT.test(title) || DROP_HINT.test(summary);
 }
 
-// 단어 중간 절단 아티팩트 (LLM이 음절을 떨어뜨린 경우 — 예: "펌웨어다" → "펌웨다")
+// 단어 중간 절단 아티팩트 (LLM이 음절을 떨어뜨린 경우 — 예: "펌웨어다" → "펌웨다", "현실화" → "현실회")
 // 17차 P0: "[중요] 앤트로픽" 시사점 "…엣지 디바이스 펌웨다." 7라운드 잔존.
 // dedupe 승자라 삭제 대상이 아니고, 기존 파편 검사(완결 어미 기준)는
 // "펌웨다."를 정상 종결로 통과시켜서 별도 감지가 필요함.
-const TRUNCATED_HINT = /펌웨다|다다\.|요요\.|됨됨\.|니다다\./;
+// 20차: 제목 절단("…자기개선 루프 현실회")도 감지 — needsRewrite에서 제목도 검사.
+// (?![복피]) — "현실회복"/"현실회피" 같은 정상 단어 오탐 방지. 절단 아티팩트는
+// 뒤에 복/피가 올 수 없음 ("현실화"의 음절 탈락이므로).
+// 향후 발견되는 패턴은 여기에 누적.
+const TRUNCATED_HINT = /펌웨다|현실회(?![복피])|다다\.|요요\.|됨됨\.|니다다\./;
 
 function looksTruncated(s: string): boolean {
   return TRUNCATED_HINT.test(s ?? "");
@@ -317,7 +334,8 @@ export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summar
   const takeaway = item.takeaway.trim();
   if (/,다\.|^[·•\-–—]/.test(takeaway)) return true;
   // 17차 P0: 단어 중간 절단 아티팩트("펌웨다.", "다다." 등)는 무조건 재작성
-  if (looksTruncated(takeaway) || looksTruncated(item.summary)) return true;
+  // 20차: 제목도 검사 ("현실회" 같은 제목 음절 탈락)
+  if (looksTruncated(item.title) || looksTruncated(takeaway) || looksTruncated(item.summary)) return true;
   // 마지막 문장이 조사(에/의/를/을/가/이/와/과/로/에서/에게)로 끝나면 파편
   if (/(에|의|를|을|가|이|와|과|로|에서|에게|한테|보다|처럼)\.$/.test(takeaway)) return true;
   // 마지막 문장이 명사 단독으로 끝나면 파편 (예: "국산 챗봇.", "가격·성능.", "해당 지역.")
@@ -331,6 +349,9 @@ export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summar
       return true;
     }
   }
+  // 20차: 시사점 마지막 문장이 할 일 어미(필요/권장/검토/확인/점검/주시/기회)로 끝나지 않으면 재작성
+  // "…몰릴 수 있다.", "…진입.", "…해야 한다." 같은 사실 서술형 결말 방지
+  if (lastSent && !/(필요|권장|검토|확인|점검|주시|기회)\.$/.test(lastSent)) return true;
   return false;
 }
 
