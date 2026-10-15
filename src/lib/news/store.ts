@@ -32,6 +32,7 @@ function readNotify(): boolean {
 
 type FeedState = {
   filter: FilterKey;
+  sourceFilter: string;
   focused: number;
   visible: number;
   notify: boolean;
@@ -39,6 +40,7 @@ type FeedState = {
   bookmarks: Record<string, number>;
   searchOpen: boolean;
   setFilter: (k: FilterKey) => void;
+  setSourceFilter: (s: string) => void;
   setFocused: (n: number) => void;
   loadMore: () => void;
   resetVisible: () => void;
@@ -53,6 +55,7 @@ export const PAGE = 20;
 
 export const useFeed = create<FeedState>((set, get) => ({
   filter: "all",
+  sourceFilter: "all",
   focused: -1,
   visible: PAGE,
   notify: false,
@@ -60,6 +63,7 @@ export const useFeed = create<FeedState>((set, get) => ({
   bookmarks: {},
   searchOpen: false,
   setFilter: (filter) => set({ filter, focused: -1, visible: PAGE }),
+  setSourceFilter: (sourceFilter) => set({ sourceFilter, focused: -1, visible: PAGE }),
   setFocused: (focused) => set({ focused }),
   loadMore: () => set({ visible: get().visible + PAGE }),
   resetVisible: () => set({ visible: PAGE }),
