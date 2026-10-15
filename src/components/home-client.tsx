@@ -9,7 +9,7 @@ import { SiteHeader } from "@/components/site-header";
 import { Ticker } from "@/components/ticker";
 import { TopicBar } from "@/components/topic-bar";
 import { useFeedHotkeys } from "@/components/use-hotkeys";
-import { counts, filterItems, tickerItems } from "@/lib/news/data";
+import { counts, filterItems, sourceCounts, tickerItems } from "@/lib/news/data";
 import { hydratePrefs, useFeed } from "@/lib/news/store";
 import type { FeedPayload } from "@/lib/news/types";
 
@@ -24,13 +24,24 @@ export function HomeClient({ data }: { data: FeedPayload }) {
   const all = data.items;
   const filter = useFeed((s) => s.filter);
   const setFilter = useFeed((s) => s.setFilter);
+  const sourceFilter = useFeed((s) => s.sourceFilter);
+  const setSourceFilter = useFeed((s) => s.setSourceFilter);
   const visible = useFeed((s) => s.visible);
   const loadMore = useFeed((s) => s.loadMore);
   const focused = useFeed((s) => s.focused);
 
-  const filtered = useMemo(() => filterItems(all, filter), [all, filter]);
+  const filtered = useMemo(
+    () => filterItems(all, filter, sourceFilter),
+    [all, filter, sourceFilter],
+  );
   const shown = filtered.slice(0, visible);
-  const c = counts(all);
+  // 등급 탭 건수는 소스 필터 적용 범위 기준 (AND 조합), 소스 드롭다운 건수는 전체 피드 기준
+  const bySource = useMemo(
+    () => (sourceFilter === "all" ? all : all.filter((i) => i.source === sourceFilter)),
+    [all, sourceFilter],
+  );
+  const c = counts(bySource);
+  const sc = useMemo(() => sourceCounts(all), [all]);
   const lastUpdated = data.lastRunAt ?? all[0]?.publishedAt ?? now;
 
   useFeedHotkeys(shown);
@@ -39,7 +50,15 @@ export function HomeClient({ data }: { data: FeedPayload }) {
     <main>
       <div className="mx-auto max-w-4xl px-3 sm:px-6">
         <SiteHeader lastUpdated={lastUpdated} showCollect={!data.lastRunAt} />
-        <FilterBar value={filter} counts={c} onChange={setFilter} />
+        <FilterBar
+          value={filter}
+          counts={c}
+          onChange={setFilter}
+          sourceValue={sourceFilter}
+          sources={sc}
+          totalCount={all.length}
+          onSourceChange={setSourceFilter}
+        />
         <TopicBar />
         <Ticker items={tickerItems(all)} />
         {filter === "all" ? (
