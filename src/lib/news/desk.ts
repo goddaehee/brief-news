@@ -387,12 +387,28 @@ export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summar
   return false;
 }
 
+// 26차 P0: 재작성 출력 후처리 오타 교정 — Codex 발견: TYPO_HINT로 감지는 되나
+// 모델이 오타난 제목을 입력으로 받아 새 시사점에도 오타를 답습함.
+// polishPayload에서 최종 출력 전에 교정.
+const TYPO_FIX: [RegExp, string][] = [
+  [/앤스로픽/g, "앤트로픽"],
+  [/챗\(클로드\)/g, "클로드"],
+  [/클로드\(챗\)/g, "클로드"],
+];
+
+function fixTypos(s: string): string {
+  let out = s;
+  for (const [re, rep] of TYPO_FIX) out = out.replace(re, rep);
+  return out;
+}
+
 export function polishPayload(
   json: Record<string, unknown>,
   entry: { title: string; source: string; sourceUrl: string; summary: string; date: number },
 ): IngestPayload {
-  const title = polishTitle(String(json.title || entry.title));
-  const takeaway = polishTakeaway(String(json.takeaway || entry.summary));
+  // 26차 P0: 최종 출력 전 오타 교정 — 재작성 시 모델이 입력 오타를 답습하는 문제 대응
+  const title = fixTypos(polishTitle(String(json.title || entry.title)));
+  const takeaway = fixTypos(polishTakeaway(String(json.takeaway || entry.summary)));
   const summary = String(json.summary || entry.summary)
     .replace(/…/g, "...")
     .replace(/\s+/g, " ")
