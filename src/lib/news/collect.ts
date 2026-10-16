@@ -1,6 +1,6 @@
 import { isSeedItem } from "./data";
 import { chatJson, resolveLlm } from "./llm";
-import { deskUser, DESK_SYSTEM, needsRewrite, polishPayload, shouldDrop } from "./desk";
+import { deskUser, DESK_SYSTEM, fixTypos, needsRewrite, polishPayload, shouldDrop } from "./desk";
 import {
   COLLECT_COOLDOWN_MS,
   COLLECT_MAX_NEW,
@@ -818,6 +818,10 @@ export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted
     if (item.originalTitle) item.originalTitle = normalizeDisplayNames(item.originalTitle);
     // 26차 P0-2: X 파이프라인 bare 어미 교정 — "… 확인." → "… 확인 필요."
     if (item.takeaway) item.takeaway = fixBareEnding(item.takeaway);
+    // 28차 P0: X 경로 desk 품질 게이트 — fixTypos 적용 (polishPayload와 동일한 교정)
+    item.title = fixTypos(item.title);
+    if (item.takeaway) item.takeaway = fixTypos(item.takeaway);
+    if (item.summary) item.summary = fixTypos(item.summary);
     if (existingUrls.has(item.sourceUrl)) {
       skipped += 1;
       continue;
