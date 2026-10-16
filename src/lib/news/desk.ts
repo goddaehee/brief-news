@@ -325,6 +325,10 @@ function looksTruncated(s: string): boolean {
 // decodeEntities가 처리하는 엔티티와 일치시킬 것 (&apos; 포함).
 const ENTITY_HINT = /&(quot|amp|apos|lt|gt|#\d+);/;
 
+// 24차 P0: 외래 고유명사 오타 — "앤스로픽"이 3라운드 연속 rewriteStale 큐에 정체.
+// needsRewrite에서 직접 감지해야 재작성 대상이 됨.
+const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)/;
+
 export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summary" | "grade">): boolean {
   if (shouldDrop(item.title, item.summary)) return true;
   if (hangulLen(item.title) > 46) return true;
@@ -351,6 +355,8 @@ export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summar
   if (looksTruncated(item.title) || looksTruncated(takeaway) || looksTruncated(item.summary)) return true;
   // 21차 P0: HTML 엔티티 잔존 — decodeEntities는 신규 유입에만 적용되므로 기존분은 재작성으로 정리
   if (ENTITY_HINT.test(item.title) || ENTITY_HINT.test(item.takeaway)) return true;
+  // 24차 P0: 외래 고유명사 오타 — "앤스로픽"이 3라운드 연속 rewriteStale 큐에 정체
+  if (TYPO_HINT.test(item.title) || TYPO_HINT.test(item.takeaway)) return true;
   // 마지막 문장이 조사(에/의/를/을/가/이/와/과/로/에서/에게)로 끝나면 파편
   if (/(에|의|를|을|가|이|와|과|로|에서|에게|한테|보다|처럼)\.$/.test(takeaway)) return true;
   // 마지막 문장이 명사 단독으로 끝나면 파편 (예: "국산 챗봇.", "가격·성능.", "해당 지역.")
