@@ -327,7 +327,8 @@ const ENTITY_HINT = /&(quot|amp|apos|lt|gt|#\d+);/;
 
 // 24차 P0: 외래 고유명사 오타 — "앤스로픽"이 3라운드 연속 rewriteStale 큐에 정체.
 // needsRewrite에서 직접 감지해야 재작성 대상이 됨.
-const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)/;
+// 27차: "노려는" 추가 — X 경로 기존 기사 처리용.
+const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)|노려는/;
 
 export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summary" | "grade">): boolean {
   if (shouldDrop(item.title, item.summary)) return true;
@@ -403,6 +404,9 @@ function fixTypos(s: string): string {
   for (const [re, rep] of TYPO_FIX) out = out.replace(re, rep);
   return out;
 }
+
+// 28차 P0: X ingest 경로에서 사용 — desk 품질 게이트
+export { fixTypos };
 
 export function polishPayload(
   json: Record<string, unknown>,
