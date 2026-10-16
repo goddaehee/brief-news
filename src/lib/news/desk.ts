@@ -11,7 +11,7 @@ export const DROP_HINT =
 /** 5차 평가: [중요] 7.5% 과소 (목표 12-18%). 힌트를 약간 복원.
  *  일반 출시/발표/협력은 제외 유지, 주요 모델 출시·보안 경고·대규모 계약 추가. */
 export const IMPORTANT_HINT =
-  /가격|인하|인상|침해|장애|중단|제재|유출|다운|수출 통제|계정 탈취|출시 연기|취약점|해킹|공격|위협|경고|주의보|소송|벌금|과징금|리콜|독점|반독점|규제|법안|정책|가이드라인|대규모 계약|대규모 투자|인수|합병|최초|기록|돌파|경신|오픈소스 공개|벤치마크|신모델 출시|신모델 공개|물리학 평가|신기록|주요 모델 출시|보안 경고|AI 자가복제|웜|사이버 공격|파산|상장|IPO/;
+  /가격|인하|인상|침해|장애|중단|제재|유출|다운|수출 통제|계정 탈취|출시 연기|취약점|해킹|공격|위협|경고|주의보|소송|소환장|벌금|과징금|리콜|독점|반독점|규제|법안|정책|가이드라인|대규모 계약|대규모 투자|인수|합병|최초|기록|돌파|경신|오픈소스 공개|벤치마크|신모델 출시|신모델 공개|물리학 평가|신기록|주요 모델 출시|보안 경고|AI 자가복제|웜|사이버 공격|파산|상장|IPO/;
 
 /** 의식/행사성 발표 제외: 모델 출시는 중요, 연구소 출범은 참고. 승격 게이트의 제외 조건. */
 const CEREMONY_GUARD = /출범|연구소|연구센터|개소식|기념식/;
@@ -20,9 +20,9 @@ const CEREMONY_GUARD = /출범|연구소|연구센터|개소식|기념식/;
  *  예: "Anthropic IPO 로드쇼", "DeepSeek 3시간 장애", "오픈AI, GPT-6 아스트라 출시"
  *  LAB의 모델명은 버전 번호가 붙은 것만 포함 — "GPT 탑재 챗봇 출시" 같은 bare 언급은 과승격 방지. */
 const FRONTIER_LAB =
-  /오픈AI|OpenAI|앤트로픽|Anthropic|구글|Google|딥마인드|DeepMind|제미나이|Gemini|딥시크|DeepSeek|xAI|그록|Grok|메타|Meta|라마|Llama|미스트랄|Mistral|엔비디아|NVIDIA|GPT-?\d|Gemini ?\d|Claude ?\d|Grok ?\d|LFM ?\d/i;
+  /오픈AI|OpenAI|앤트로픽|Anthropic|구글|Google|딥마인드|DeepMind|제미나이|Gemini|딥시크|DeepSeek|xAI|그록|Grok|메타|Meta|라마|Llama|미스트랄|Mistral|엔비디아|NVIDIA|GPT-?\d|Gemini ?\d|Claude ?\d|Grok ?\d|LFM ?\d|Nemotron|Muse|Wonder|Argon|Qwen|Gemma/i;
 const FRONTIER_EVENT =
-  /출시|공개|발표|벤치마크|벤치|평가|1위|신기록|돌파|경신|98점|99점|100점|IPO|상장|매출|실적|장애|다운|단종|가격|인하|인상/i;
+  /출시|공개|발표|지원 시작|벤치마크|벤치|평가|1위|신기록|돌파|경신|98점|99점|100점|IPO|상장|매출|실적|장애|다운|단종|가격|인하|인상|launch(?:es|ed)?|releases?d?|unveil(?:s|ed)?|announces?d?|outage|benchmark/i;
 
 function isFrontierEvent(title: string, takeaway: string): boolean {
   const t = `${title} ${factPart(takeaway)}`;
