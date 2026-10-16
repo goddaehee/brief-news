@@ -483,7 +483,8 @@ async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>): Pro
   if (!resolveLlm()) return 0;
   // 24차 P0: 오타/파편을 일반 stale보다 먼저 처리 — "앤스로픽"이 3라운드 정체된 원인.
   // needsRewrite는 통과하는데 큐 앞에서 밀려서 처리 안 됨.
-  const typoHint = /앤스로픽|펌웨다|현실회(?![복피])|&(quot|amp|apos|lt|gt|#\d+);|챗\(클로드\)/;
+  // 28차: 노려는 추가 (TYPO_HINT와 일치)
+  const typoHint = /앤스로픽|펌웨다|현실회(?![복피])|&(quot|amp|apos|lt|gt|#\d+);|챗\(클로드\)|노려는/;
   const stale = existing
     .filter((i) => !isSeedItem(i) && needsRewrite(i))
     .sort((a, b) => {
