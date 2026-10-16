@@ -400,6 +400,16 @@ function normalizeDisplayNames(s: string): string {
   return out;
 }
 
+// 26차 P0-2: X 파이프라인 품질 린터 — bare "확인."/"점검." 어미를 완결형으로 교정.
+// X 수집은 desk.ts의 needsRewrite를 우회하므로 여기서 직접 처리.
+function fixBareEnding(s: string): string {
+  // "… 확인." → "… 확인 필요." (단, 이미 "확인 필요." 등이면 그대로)
+  return s.replace(
+    /(?<!필요|권장|검토|주시|기회)\s*(확인|점검)\.\s*$/,
+    (m, verb) => ` ${verb} 필요.`
+  ).trim();
+}
+
 function tooSimilar(a: string, b: string, da?: number, db?: number): boolean {
   const fa = foldTitle(a);
   const fb = foldTitle(b);
@@ -806,6 +816,8 @@ export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted
     if (item.takeaway) item.takeaway = normalizeDisplayNames(item.takeaway);
     if (item.summary) item.summary = normalizeDisplayNames(item.summary);
     if (item.originalTitle) item.originalTitle = normalizeDisplayNames(item.originalTitle);
+    // 26차 P0-2: X 파이프라인 bare 어미 교정 — "… 확인." → "… 확인 필요."
+    if (item.takeaway) item.takeaway = fixBareEnding(item.takeaway);
     if (existingUrls.has(item.sourceUrl)) {
       skipped += 1;
       continue;
