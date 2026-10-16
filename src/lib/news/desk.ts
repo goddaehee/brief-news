@@ -394,6 +394,8 @@ const TYPO_FIX: [RegExp, string][] = [
   [/앤스로픽/g, "앤트로픽"],
   [/챗\(클로드\)/g, "클로드"],
   [/클로드\(챗\)/g, "클로드"],
+  // 26차: Gemini 발견 "노려는" → "노리는"
+  [/노려는/g, "노리는"],
 ];
 
 function fixTypos(s: string): string {
