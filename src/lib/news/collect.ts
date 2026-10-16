@@ -471,7 +471,17 @@ function sharesTopicAnchor(a: string, b: string, da?: number, db?: number): bool
 
 async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>): Promise<number> {
   if (!resolveLlm()) return 0;
-  const stale = existing.filter((i) => !isSeedItem(i) && needsRewrite(i)).slice(0, COLLECT_REWRITE_MAX);
+  // 24차 P0: 오타/파편을 일반 stale보다 먼저 처리 — "앤스로픽"이 3라운드 정체된 원인.
+  // needsRewrite는 통과하는데 큐 앞에서 밀려서 처리 안 됨.
+  const typoHint = /앤스로픽|펌웨다|현실회(?![복피])|&(quot|amp|apos|lt|gt|#\d+);|챗\(클로드\)/;
+  const stale = existing
+    .filter((i) => !isSeedItem(i) && needsRewrite(i))
+    .sort((a, b) => {
+      const aUrgent = typoHint.test(a.title) || typoHint.test(a.takeaway) ? 0 : 1;
+      const bUrgent = typoHint.test(b.title) || typoHint.test(b.takeaway) ? 0 : 1;
+      return aUrgent - bUrgent;
+    })
+    .slice(0, COLLECT_REWRITE_MAX);
   // 순차 처리 시 최대 3×25초=75초 → 병렬로 변경 (Vercel 60초 제한 대응)
   const results = await Promise.all(
     stale.map(async (item): Promise<number> => {
