@@ -3,7 +3,7 @@ import { INGEST_MAX_BATCH } from "@/lib/news/sources";
 import type { IngestPayload } from "@/lib/news/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
