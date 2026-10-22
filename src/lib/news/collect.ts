@@ -484,7 +484,7 @@ async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>): Pro
   // 24차 P0: 오타/파편을 일반 stale보다 먼저 처리 — "앤스로픽"이 3라운드 정체된 원인.
   // needsRewrite는 통과하는데 큐 앞에서 밀려서 처리 안 됨.
   // 28차: 노려는 추가 (TYPO_HINT와 일치)
-  const typoHint = /앤스로픽|펌웨다|현실회(?![복피])|&(quot|amp|apos|lt|gt|#\d+);|챗\(클로드\)|노려는/;
+  const typoHint = /앤스로픽|펌웨다|현실회(?![복피])|&(quot|amp|apos|lt|gt|#\d+);|챗\(클로드\)|노려는|(?<=\s)대익(?=\s)/;
   const stale = existing
     .filter((i) => !isSeedItem(i) && needsRewrite(i))
     .sort((a, b) => {
@@ -797,6 +797,15 @@ async function refreshBriefing() {
   await upsertBriefing(lines);
 }
 
+/** 영문 우세 판정 (29차 P0): 한글 음절 비율이 낮으면 영문 원문으로 본다. */
+function isEnglishDominant(s: string): boolean {
+  const hangul = (s.match(/[가-힣]/g) || []).length;
+  const latin = (s.match(/[A-Za-z]/g) || []).length;
+  const letters = hangul + latin;
+  if (letters < 8) return false;
+  return hangul / letters < 0.3;
+}
+
 export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted: number; skipped: number }> {
   await ensureSeeded();
   // P0: RSS 수집 경로와 동일한 중복 검사. X 보충 수집이 볼륨을 키우기 전 구멍 봉쇄.
@@ -806,8 +815,14 @@ export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted
   const batch: IngestPayload[] = [];
   let inserted = 0;
   let skipped = 0;
-  for (const item of items.slice(0, INGEST_MAX_BATCH)) {
+  for (let item of items.slice(0, INGEST_MAX_BATCH)) {
     if (!item.title || !item.sourceUrl) {
+      skipped += 1;
+      continue;
+    }
+    // 29차 크로스 리뷰: 중복 URL은 데스크 패스(LLM) 전에 제외 — 이미 있는 기사를
+    // 영문 게이트가 먼저 재작성하고 뒤늦게 버리는 LLM 낭비 방지.
+    if (existingUrls.has(item.sourceUrl)) {
       skipped += 1;
       continue;
     }
@@ -823,9 +838,32 @@ export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted
     item.title = fixTypos(item.title);
     if (item.takeaway) item.takeaway = fixTypos(item.takeaway);
     if (item.summary) item.summary = fixTypos(item.summary);
-    if (existingUrls.has(item.sourceUrl)) {
-      skipped += 1;
-      continue;
+    // 29차 P0: 영문 미번역 게이트 — X ingest 번역 폴백으로 들어온 영문 제목·시사점이
+    // 그대로 피드 최상위에 노출됨 (실측: [속보] 2건 제목·시사점 100% 영문, 요약=시사점 동일 문장).
+    // 영문 우세면 즉시 넣지 말고 RSS와 같은 데스크 패스(classifyEntry)로 한국어 재작성을 강제한다.
+    // 제목·시사점이 모두 영문 우세일 때만 발동 — 영문 제품명이 많은 정상 한글 제목
+    // ("NVIDIA Nemotron 3.5 공개" + 한글 시사점)의 오탐 방지 (29차 크로스 리뷰).
+    // 유사도 검사는 최종(한국어) 제목 기준으로 해야 하므로 그보다 앞에 둔다.
+    if (isEnglishDominant(item.title) && (!item.takeaway || isEnglishDominant(item.takeaway))) {
+      const desked = await classifyEntry({
+        title: item.originalTitle || item.title,
+        sourceUrl: item.sourceUrl,
+        source: item.source,
+        date: item.publishedAt ?? Date.now(),
+        summary: item.summary || item.takeaway || "",
+      });
+      // 강제 재작성 경로에서는 데스크가 실제로 다시 쓴 경우(keep===true)에만 입고한다.
+      // LLM 실패 폴백(keep 필드 없음)·드롭 판정·결과가 여전히 영문이면 넣지 않는다 —
+      // 게이트가 오히려 새 영문 노출 통로가 되는 것 방지 (29차 크로스 리뷰 블로커).
+      if (
+        desked.keep !== true ||
+        isEnglishDominant(desked.title) ||
+        (desked.takeaway && isEnglishDominant(desked.takeaway))
+      ) {
+        skipped += 1;
+        continue;
+      }
+      item = desked;
     }
     if (
       existingItems.some(
