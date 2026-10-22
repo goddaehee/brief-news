@@ -24,9 +24,26 @@ const FRONTIER_LAB =
 const FRONTIER_EVENT =
   /출시|공개|발표|지원 시작|벤치마크|벤치|평가|1위|신기록|돌파|경신|98점|99점|100점|IPO|상장|매출|실적|장애|다운|단종|가격|인하|인상|launch(?:es|ed)?|releases?d?|unveil(?:s|ed)?|announces?d?|outage|benchmark/i;
 
-function isFrontierEvent(title: string, takeaway: string): boolean {
-  const t = `${title} ${factPart(takeaway)}`;
-  return FRONTIER_LAB.test(t) && FRONTIER_EVENT.test(t) && !CEREMONY_GUARD.test(t);
+// 원제목 단독 승격용 강한 출시 신호 (29차 크로스 리뷰: announce/발표 같은 약한 신호는 제외 —
+// "OpenAI announces partnership" 류 협력 발표가 원제목만으로 승격되는 과승격 재현됨)
+const FRONTIER_EVENT_STRONG =
+  /출시|단종|장애|launch(?:es|ed)?|releases?d?|unveil(?:s|ed)?|outage|benchmark/i;
+// 영문 원제목의 행사성 가드 (CEREMONY_GUARD의 영문판 — "announces new research center" 승격 차단)
+const CEREMONY_GUARD_EN = /research (?:center|centre|institute|lab)|inaugurat|opening ceremony/i;
+
+// 29차 P0: 검사 대상에 원제목(originalTitle) 포함 — 데스크 LLM이 한글 제목을 다시 쓰며
+// 원문의 출시 신호(release/launch/출시)가 탈락하면 승격이 누락됨
+// (실측: Claude API 신규 버전, 원제에 "출시" 있는데 한글 제목은 "파라미터 제거"라 [참고]로 강등).
+// 단, 원제목만으로 승격할 땐 강한 신호(FRONTIER_EVENT_STRONG)만 인정한다.
+function isFrontierEvent(title: string, takeaway: string, originalTitle = ""): boolean {
+  const desk = `${title} ${factPart(takeaway)}`;
+  const all = `${desk} ${originalTitle}`;
+  if (!FRONTIER_LAB.test(all)) return false;
+  if (CEREMONY_GUARD.test(all) || CEREMONY_GUARD_EN.test(originalTitle)) return false;
+  // 데스크 제목 자체의 이벤트 신호는 기존 판정 유지
+  if (FRONTIER_EVENT.test(desk)) return true;
+  // 원제목만으로 승격할 땐 강한 출시 신호만 인정
+  return FRONTIER_EVENT_STRONG.test(originalTitle);
 }
 
 /** 시사점의 "할 일" 문장을 제외한 사실 부분만 반환.
@@ -283,7 +300,7 @@ export function polishTakeaway(raw: string): string {
   return t;
 }
 
-export function polishGrade(grade: Grade, title: string, takeaway: string): Grade {
+export function polishGrade(grade: Grade, title: string, takeaway: string, originalTitle = ""): Grade {
   // 16차: 승격 게이트는 제목 + 시사점 사실 부분만 본다 (할 일 상용구 오탐 방지)
   const t = `${title} ${factPart(takeaway)}`;
   if (grade === "breaking" && !/장애|다운|중단|지연|가격|인하|인상/.test(t)) return "note";
@@ -295,7 +312,7 @@ export function polishGrade(grade: Grade, title: string, takeaway: string): Grad
   // (강등된 important도 여기서 구제됨 — 대칭 게이트)
   // 15차 평가: 프런티어 모델 출시·벤치마크·실적도 승격 (promppy [중요] 커버리지 대응)
   // 의식/행사성 제외 가드는 isFrontierEvent 내부에만 — 리스크 경로는 막지 않는다
-  if (g === "note" && (IMPORTANT_HINT.test(t) || isFrontierEvent(title, takeaway))) {
+  if (g === "note" && (IMPORTANT_HINT.test(t) || isFrontierEvent(title, takeaway, originalTitle))) {
     return "important";
   }
   return g;
@@ -328,9 +345,13 @@ const ENTITY_HINT = /&(quot|amp|apos|lt|gt|#\d+);/;
 // 24차 P0: 외래 고유명사 오타 — "앤스로픽"이 3라운드 연속 rewriteStale 큐에 정체.
 // needsRewrite에서 직접 감지해야 재작성 대상이 됨.
 // 27차: "노려는" 추가 — X 경로 기존 기사 처리용.
-const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)|노려는/;
+// 29차: "대익" 추가 — Grok 발견: "보안 위협 대익 자동화" (대응 오기).
+// 단독 단어로 공백 사이에 있을 때만 — "김대익" 같은 인명 오교정 방지 (29차 크로스 리뷰 재현).
+const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)|노려는|(?<=\s)대익(?=\s)/;
 
-export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summary" | "grade">): boolean {
+export function needsRewrite(
+  item: Pick<NewsItem, "title" | "takeaway" | "summary" | "grade" | "originalTitle">,
+): boolean {
   if (shouldDrop(item.title, item.summary)) return true;
   if (hangulLen(item.title) > 46) return true;
   if (hangulLen(item.takeaway) > 95) return true;
@@ -340,12 +361,12 @@ export function needsRewrite(item: Pick<NewsItem, "title" | "takeaway" | "summar
   // 16차: 힌트 검사는 시사점 사실 부분만 (할 일 상용구 오탐 방지).
   // 프런티어 승격분(로봇팔 벤치, 베라 CPU 랙)도 힌트로 인정 — 매 수집마다 재작성 방지.
   const ttw = `${item.title} ${factPart(item.takeaway)}`;
-  if (item.grade === "important" && !(IMPORTANT_HINT.test(ttw) || isFrontierEvent(item.title, item.takeaway))) return true;
+  if (item.grade === "important" && !(IMPORTANT_HINT.test(ttw) || isFrontierEvent(item.title, item.takeaway, item.originalTitle))) return true;
   // 승격: [참고]인데 강한 중요 신호가 있으면 재작성 → polishGrade 승격 로직이 적용됨
   // (기존 [참고] 기사는 승격 로직 배포 전 분류분이라 재작성이 필요)
   // 15차 평가: 프런티어 이벤트도 승격 대상 ([중요] 커버리지)
   // (15차 리뷰: 의식/행사성 제외 가드는 isFrontierEvent 내부에만 — 리스크 경로는 막지 않는다)
-  if (item.grade === "note" && (IMPORTANT_HINT.test(ttw) || isFrontierEvent(item.title, item.takeaway)))
+  if (item.grade === "note" && (IMPORTANT_HINT.test(ttw) || isFrontierEvent(item.title, item.takeaway, item.originalTitle)))
     return true;
   // 파편 시사점: 아티팩트 패턴이면 무조건 재작성 (길이 조건 제거 — Claude 발견: 파편은 짧아서 기존 조건에 안 걸림)
   // ",다.", "·" 시작, 조사/명사 단독 종결, 단어 중간 절단
@@ -397,6 +418,9 @@ const TYPO_FIX: [RegExp, string][] = [
   [/클로드\(챗\)/g, "클로드"],
   // 26차: Gemini 발견 "노려는" → "노리는"
   [/노려는/g, "노리는"],
+  // 29차: Grok 발견 "대익" → "대응" ("보안 위협 대익 자동화").
+  // 공백 사이의 단독 사용만 교정 — 인명("김대익") 오교정 방지.
+  [/(?<=\s)대익(?=\s)/g, "대응"],
 ];
 
 function fixTypos(s: string): string {
@@ -426,6 +450,7 @@ export function polishPayload(
       : "note",
     title,
     takeaway,
+    entry.title,
   );
   const topics = Array.isArray(json.topics)
     ? json.topics.filter((x): x is string => typeof x === "string" && Boolean(TOPIC_MAP[x])).slice(0, 4)
