@@ -377,7 +377,7 @@ const ENTITY_HINT = /&(quot|amp|apos|lt|gt|#\d+);/;
 // 27차: "노려는" 추가 — X 경로 기존 기사 처리용.
 // 29차: "대익" 추가 — Grok 발견: "보안 위협 대익 자동화" (대응 오기).
 // 단독 단어로 공백 사이에 있을 때만 — "김대익" 같은 인명 오교정 방지 (29차 크로스 리뷰 재현).
-const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)|노려는|시크릟|(?<=\s)대익(?=\s)/;
+const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)|노려는|시크릟|휴깅페이스|(?<=\s)대익(?=\s)/;
 
 export function needsRewrite(
   item: Pick<NewsItem, "title" | "takeaway" | "summary" | "grade" | "originalTitle">,
@@ -455,6 +455,9 @@ const TYPO_FIX: [RegExp, string][] = [
   [/(?<=\s)대익(?=\s)/g, "대응"],
   // 31차: 패널 발견 "시크릟" → "시크릿" (레일웨이 유출 기사 시사점).
   [/시크릟/g, "시크릿"],
+  // 32차: 표기 통일 — "휴깅페이스" → "허깅페이스" (X 경로는 DISPLAY_NAME_MAP이,
+  // RSS·재작성 경로는 여기가 담당).
+  [/휴깅페이스/g, "허깅페이스"],
 ];
 
 function fixTypos(s: string): string {
