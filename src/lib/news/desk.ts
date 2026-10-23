@@ -12,6 +12,17 @@ export const DROP_HINT =
 const TITLE_DROP_HINT =
   /산업대전|(박람회|엑스포)\s*(개막|개최)|신용시설|전환사채|회사채 발행|적자 현금흐름|분기 실적 발표|(골드만|모건스탠리|JP모건).{0,24}(전망|목표주가)/i;
 
+/** 36차: 문화 화제성 잡음 — "네덜란드 밴드 뮤직비디오 화제", "문학상 논쟁".
+ *  36차 재심 (Codex): "뮤직비디오 생성 API 가격 인하", "문학상 심사 AI 개인정보 유출" 같은
+ *  제품·가격·보안 기사는 보존 — 제품/가격/보안 신호가 있으면 폐기하지 않음. */
+const CULTURE_DROP_HINT = /뮤직비디오|문학상/;
+// 36차 재심 v3: 장애·중단·제재·리콜·침해·소송도 보존
+// ("문학상 심사 AI 서비스 장애로 접수 중단" 반례).
+const CULTURE_KEEP_HINT = /API|가격|인하|인상|유출|보안|취약점|모델|출시|공개|장애|중단|제재|리콜|침해|소송/;
+function titleCultureDrop(title: string): boolean {
+  return CULTURE_DROP_HINT.test(title) && !CULTURE_KEEP_HINT.test(title);
+}
+
 /** Pipeline-now. Name-drops (출시·연구소) are 참고. */
 /** 5차 평가: [중요] 7.5% 과소 (목표 12-18%). 힌트를 약간 복원.
  *  일반 출시/발표/협력은 제외 유지, 주요 모델 출시·보안 경고·대규모 계약 추가. */
@@ -85,6 +96,7 @@ export const DESK_SYSTEM = `당신은 한국 AI 실무자용 뉴스 터미널 br
 - 정확히 두 조각: "사실 한 줄. 할 일 한 줄."
 - 첫 문장(사실)은 제목을 베껴쓰지 말고 해석을 얹을 것. 예: 제목이 "오픈AI 엔지니어 체포"라면 "내부자 위협 현실화."처럼 사건에 프레임을 씌울 것. "엔지니어가 체포됐다"는 리드 복사에 불과.
 - 할 일은 구체적 행동으로: 누가 무엇을 해야 하는지 명시 ("도입 전 가격 비교 권장", "API 사용 중이면 폴백 로직 점검 필요").
+- 할 일은 제목의 주장 방향과 일치시킬 것. 제목이 "쿼터 축소 의혹"이면 "축소 여부 확인 필요"처럼 같은 방향으로 — 반대 방향("상향 여부 확인") 금지.
 - 금지: "~주시 필요", "~동향 주시", "~영향 주시", "~검토할 시점", "~검증해볼 시점", "~참고할 만함" 같은 관망형·모호한 어미. 막연한 표현으로 끝내지 말 것. 할 일 문장은 반드시 필요/검토/권장/주시/기회 중 하나로 끝낼 것. "확인."·"점검."으로만 끝내는 미완결 종결 금지 ("확인 필요"처럼 필요를 붙일 것).
 - 제품·모델명은 한글 표기를 우선한다. 영문만으로 널리 쓰이는 이름(GPT-5, API 등)은 영문 그대로 쓴다. '영문(한글)' 병기는 쓰지 않는다.
 - 원문 첫 문장·리드 복사 금지. 명령조(해라·하라) 금지.
@@ -100,7 +112,9 @@ export const DESK_SYSTEM = `당신은 한국 AI 실무자용 뉴스 터미널 br
 등급 grade — 목표 분포: breaking 2~3%, important 12~18%, 나머지는 note.
 - breaking: 지금 진행 중인 대형 서비스 장애, 당일 긴급 발표된 주요 출시, 즉시 적용되는 가격·정책 변경.
 - important: 주요 모델·제품의 출시/공개, 가격·요금제 변동, 보안 취약점 발견, 대규모 계약·투자·인수합병, 규제·제재 발표, 업계 판도를 바꾸는 소식 — 이번 주 실무에 바로 닿는 것.
-- tip: 무료 모델 공개, 프롬프트 기법, 로컬 LLM 설정법처럼 오늘 바로 써먹을 수 있는 실용 정보.
+- important 제외 (note 이하): 벤더의 자체 역량·수치 홍보("위협 탐지 역량 23배 확대"), 하드웨어 액세서리(전력 모듈·쿨링·서버랙), 특정 지역 한정 출시("일본 출시"), M&A 논의·추진·검토 단계의 주식·지배구조 소식, 개인의 의견·전망 기사. 단 AI 랩의 대규모 인수합병 완료 건은 important.
+- AI와 직접 관련 없는 M&A·지배구조·주식·공시 기사는 keep=false.
+- tip: 무료 모델 공개, 프롬프트 기법, 로컬 LLM 설정법처럼 오늘 바로 쓰는 실용 정보. 침해 사고·보안 경고는 tip이 아니라 important/note.
 - note: 위 어디에도 해당하지 않는 일반 업계 동향.
 
 keep=false
@@ -124,6 +138,8 @@ export function deskUser(entry: {
 {"keep":true,"title":"오픈AI, API 장문 입력 요금 인하","takeaway":"장문 컨텍스트 호출 비용 부담 완화. 대량 문서 처리 워크로드라면 새 요금제 적용 시점 확인.","summary":"오픈AI가 API 장문 입력 요금을 인하했다. 128K 이상 구간 단가가 조정된다. 기존 배치 작업의 비용 재산정이 가능하다.","grade":"important","tip":false,"topics":["openai"]}
 {"keep":true,"title":"앤트로픽, 클로드 API 장애 복구","takeaway":"2시간 장애 후 정상화. 클로드 API 연동 서비스는 장애 시간대 요청 누락 여부 점검.","summary":"앤트로픽 클로드 API에서 2시간 장애가 발생했다. 상태 페이지에 공지됐다. 현재는 정상화됐다.","grade":"important","tip":false,"topics":["anthropic"]}
 {"keep":true,"title":"과기정통부, AI 기본법 시행령 입법예고","takeaway":"고영향 AI 의무 조항 세부 기준 공개. 해당 사업자는 의견 수렴 기간 내 적용 범위 주시.","summary":"과기정통부가 AI 기본법 시행령을 입법예고했다. 고영향 AI 판정 기준이 담겼다. 의견 수렴은 다음 달까지다.","grade":"note","tip":false,"topics":["korea-ai","regulation"]}
+{"keep":true,"title":"슈나이더, 엔비디아 'GB300' 맞춤 전력 모듈 선봬","takeaway":"데이터센터 전력 장비 선택지 확대. 도입 예정 기업은 전력·냉각 요구 조건 비교 권장.","summary":"슈나이더가 GB300용 2.5MW 전력 모듈을 공개했다. 액체 냉각 대응 제품이다. 인프라 투자 계획이 있는 기업만 보면 된다.","grade":"note","tip":false,"topics":["hardware"]}
+{"keep":true,"title":"게임 NPC 실시간 대화 구현 도구 'NPCTalk' 공개","takeaway":"오픈소스 NPC 대화 도구 등장. 유니티·언리얼 연동 예제가 있어 바로 실험해볼 기회.","summary":"NPCTalk가 공개됐다. 게임 NPC와 실시간 대화할 수 있는 오픈소스 도구다. 유니티와 언리얼 플러그인을 제공한다.","grade":"note","tip":true,"topics":["open-source"]}
 {"keep":false,"title":"","takeaway":"","summary":"","grade":"note","tip":false,"topics":[]}
 
 JSON 스키마:
@@ -171,6 +187,8 @@ export function polishTitle(raw: string): string {
     .replace(/\s+/g, " ")
     .replace(/^(속보|단독|종합|업데이트)\s*[|:：\-–]\s*/u, "")
     .trim();
+  // 36차 재심 (Codex): "..." 부제 꼬리는 쉼표 치환으로 의미가 바뀌므로 여기서 고치지 않고
+  // needsRewrite 트리거로 넘긴다 — LLM이 부제를 자르고 다시 쓰게.
   t = clipChars(t, 44);
   return t.slice(0, 56);
 }
@@ -203,7 +221,9 @@ export function polishTakeaway(raw: string): string {
     .replace(/\.{2,}/g, ".")
     .trim();
 
-  let parts = t.split(/(?<=다\.|함\.|음\.|됨\.|필요\.|검토\.|권장\.|주시\.|전망\.|기회\.)\s+/u).filter((p) => p.trim());
+  // 36차: "가." 종결도 문장 경계로 인정 — "오픈 웨이트 에이전트 모델 추가. 투게더..."
+  // 같은 3문장 시사점이 parts.slice(0,2)를 우회하던 구멍 (35차 B09 미니맥스).
+  let parts = t.split(/(?<=다\.|가\.|함\.|음\.|됨\.|필요\.|검토\.|권장\.|주시\.|전망\.|기회\.)\s+/u).filter((p) => p.trim());
   if (parts.some((p) => LEAD_HINT.test(p) && hangulLen(p) > 50)) {
     const action = parts.filter((p) => /필요|검토|권장|주시|기회|확인/.test(p));
     parts = action.length ? action.slice(0, 2) : parts.filter((p) => !LEAD_HINT.test(p)).slice(0, 2);
@@ -325,9 +345,48 @@ export function polishGrade(grade: Grade, title: string, takeaway: string, origi
   // 기존 IMPORTANT_HINT는 "규제·정책·법안" 같은 약한 단어만으로도 [중요]를 유지시켜
   // 주장성 기사(휴깅페이스 "규제 산업 전환 가속")가 과승격됐다 (31차 패널).
   let g = grade;
-  if (g === "important" && !hasStrongSignal(title, takeaway, originalTitle)) g = "note";
-  if (g === "note" && hasStrongSignal(title, takeaway, originalTitle)) return "important";
+  // 36차: NOTE_FORCE가 걸리면 승격 라인이 다시 올리지 못하게 forced 플래그로 차단.
+  const forced = forceNoteReason(title, takeaway);
+  if (g === "important" && !forced && !hasStrongSignal(title, takeaway, originalTitle)) g = "note";
+  if (g === "important" && forced) g = "note";
+  if (g === "note" && !forced && hasStrongSignal(title, takeaway, originalTitle)) return "important";
   return g;
+}
+
+/** 36차: [중요] 강등 강제 패턴. hasStrongSignal이 true여도 note로 내린다.
+ *  (위협·unveil·Nemotron 같은 신호가 벤더 홍보·액세서리·지역 출시를 승격시키던 구멍)
+ *  needsRewrite에서도 사용 — 기존 과승격분을 재작성 큐로 끌어내기 위해 export.
+ *  36차 재심: 리콜·침해·유출·장애·제재 같은 강한 리스크 신호가 있으면 강등하지 않음
+ *  ("서버랙 화재 위험으로 전량 리콜", "탐지율 조작 혐의로 제재" 반례 — Codex). */
+const NOTE_FORCE: [RegExp, string][] = [
+  // "테슬라·스페이스X 합병 논의 시작" — M&A 논의 단계는 루머성 지배구조 (완료된 건은 제외).
+  // 설은 '설명' 오탐 방지용 경계 (Codex: "인수 완료 설명" 반례).
+  [/(합병|인수|매각).{0,12}(논의|추진|검토|수순)|(?<![가-힣])(인수설|합병설|매각설)(?![가-힣])/, "M&A 논의"],
+  // "슈나이더, 엔비디아 'GB300' 맞춤 2.5MW 전력 모듈 선봬" — 하드웨어 액세서리
+  [/(전력\s*모듈|쿨링\s*시스템|냉각\s*장치|서버\s*랙|\bUPS\b)/, "HW 액세서리"],
+  // "센티넬원, AI 위협 탐지 역량 1년 새 23배 확대" — 벤더 홍보성 역량 수치
+  [/(역량|커버리지|탐지율|정확도).{0,12}(확대|강화|성장|달성|경신)/, "역량 홍보"],
+  // "메타 AI 에이전트 '뮤즈' 일본 출시" — 지역 한정 출시
+  [/(일본|유럽|동남아|인도|중동|남미|호주|캐나다).{0,24}(출시|진출|선봬|공개)/, "지역 출시"],
+];
+
+export function forceNoteReason(title: string, takeaway: string): string | null {
+  // 36차 재심 v3 (Codex):
+  // - 법안·규제 기사는 강등하지 않음 ("유럽, AI 법안 통과 및 적용 지침 공개" 반례).
+  // - 리스크 가드는 제목 + 시사점(명사형 "공격자/위협의"는 제거 후 판정).
+  //   "슈나이더, 서버랙 공급 계획 수정" + 시사점 "화재 위험으로 전량 리콜" 보존.
+  if (/(법안|규제)/.test(title)) return null;
+  if (RISK_HINT.test(title)) return null;
+  // "(공격|위협)(자의|의|자)" 명사형 제거 — "공격자의 흔적"은 사건이 아님.
+  // 36차 재심 v4 (Codex): 접미부 필수 — optional이면 "사이버 공격 발생."의 독립된
+  // "공격"까지 지워져 RISK 보호가 무력화됨. "공격 발생"은 보호되어야 함.
+  const takeawayRisk = factPart(takeaway).replace(/(공격|위협)(자의|의|자)(?![가-힣])\s*/g, "");
+  if (RISK_HINT.test(takeawayRisk)) return null;
+  const t = `${title} ${factPart(takeaway)}`;
+  for (const [re, reason] of NOTE_FORCE) {
+    if (re.test(t)) return reason;
+  }
+  return null;
 }
 
 /** 강한 중요 신호 (32차). 약한 정책 단어(규제·정책·법안·가이드라인 단독)는 제외.
@@ -335,12 +394,19 @@ export function polishGrade(grade: Grade, title: string, takeaway: string, origi
  *  (31차: 딥마인드 ForTy 삼림 지도 — 무료 데이터 공개가 [중요]로 과승격). */
 const STRONG_HINT =
   /가격|인하|인상|침해|장애|중단|제재|유출|다운|수출 통제|계정 탈취|출시 연기|취약점|해킹|공격|소송|소환장|벌금|과징금|리콜|반독점|대규모 계약|대규모 투자|인수|합병|오픈소스 공개|벤치마크|신모델 출시|신모델 공개|신기록|주요 모델 출시|보안 경고|사이버 공격|AI 자가복제|웜|파산|상장|IPO|법안 통과/;
+// 36차 재심: 쿼터·요금제는 변경 맥락과 결합될 때만 강한 신호.
+// "AI 쿼터백 훈련 도구 공개" (Codex 반례) 같은 오탐 방지.
+// 36차 재심 v3: "AI 쿼터백 훈련 기능 확대" — 쿼터(?!백)으로 쿼터백 제외.
+const QUOTA_CHANGE_HINT =
+  /(쿼터(?!백)|요금제).{0,12}(축소|확대|인상|인하|변경|제한|조정|개편)|(축소|확대|인상|인하|변경|제한).{0,12}(쿼터(?!백)|요금제)/;
 const DATASET_RELEASE = /지도|데이터셋|데이터 세트|말뭉치|코퍼스/;
 const RISK_HINT = /침해|유출|장애|중단|가격|인하|인상|제재|소송|소환장|취약점|해킹|공격|연기|단종|벌금|과징금|리콜/;
 
 export function hasStrongSignal(title: string, takeaway: string, originalTitle = ""): boolean {
   const t = `${title} ${factPart(takeaway)}`;
   if (STRONG_HINT.test(t)) return true;
+  // 36차: 쿼터·요금제 변경 ("클로드 오퍼스 5.5 이용량 쿼터 몰래 축소 의혹" — 35차 Grok 과소 지적)
+  if (QUOTA_CHANGE_HINT.test(t)) return true;
   // 데이터셋·지도 공개는 그 자체(프런티어 이벤트 경로)만으로 승격하지 않는다.
   // 단, 법안 통과·제재 같은 명시적 강한 신호가 있으면 그 경로는 그대로 인정
   // (32차 크로스 리뷰: "데이터셋 공개 의무화 법안 통과"까지 막는 모순 교정).
@@ -349,7 +415,12 @@ export function hasStrongSignal(title: string, takeaway: string, originalTitle =
 }
 
 export function shouldDrop(title: string, summary: string): boolean {
-  return DROP_HINT.test(title) || DROP_HINT.test(summary) || TITLE_DROP_HINT.test(title);
+  return (
+    DROP_HINT.test(title) ||
+    DROP_HINT.test(summary) ||
+    TITLE_DROP_HINT.test(title) ||
+    titleCultureDrop(title)
+  );
 }
 
 // 단어 중간 절단 아티팩트 (LLM이 음절을 떨어뜨린 경우 — 예: "펌웨어다" → "펌웨다", "현실화" → "현실회")
@@ -377,7 +448,12 @@ const ENTITY_HINT = /&(quot|amp|apos|lt|gt|#\d+);/;
 // 27차: "노려는" 추가 — X 경로 기존 기사 처리용.
 // 29차: "대익" 추가 — Grok 발견: "보안 위협 대익 자동화" (대응 오기).
 // 단독 단어로 공백 사이에 있을 때만 — "김대익" 같은 인명 오교정 방지 (29차 크로스 리뷰 재현).
-const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)|노려는|시크릟|휴깅페이스|제약가(?=\s|$)|스노우플레이스|(?<=\s)대익(?=\s)/;
+// 36차: 35차 패널 발견분 — 지미니(제미나이), 토효율(토큰 효율), 킴이(키미),
+// 칸바(캔바, 34차 교정은 있었으나 힌트 누락), 스모그-네모트론(Smaug 오역).
+// 36차 재심 (Codex): 인명·일반명사 오교정 방지 — 제품 문맥이 확인될 때만.
+// 킴이는 K3.1/모델/버전이 뒤따를 때만, 지미니는 "구글 지미니"일 때만,
+// 토효율은 단독 단어일 때만 ("국토효율" 보호).
+const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)|노려는|시크릟|휴깅페이스|제약가(?=\s|$)|스노우플레이스|(?<=\s)대익(?=\s)|구글 지미니|(?<![가-힣])토효율(?![가-힣])|킴이(?=\s*[Kk]\d)|칸바(?=[\s,·ㆍ:])|스모그-네모트론/i;
 
 export function needsRewrite(
   item: Pick<NewsItem, "title" | "takeaway" | "summary" | "grade" | "originalTitle">,
@@ -388,6 +464,10 @@ export function needsRewrite(
   // 34차: 33차 패널이 원문 길이(공백·기호 포함) 기준으로 재니 하한 미달이
   // 25%였다 — hangulLen 27이면 원문 27자일 수 있어 임계를 28로 올린다.
   if (hangulLen(item.title) < 28) return true;
+  // 36차: "..." 부제 꼬리 — "파이어웍스, 'M3.1 Flash' 서버리스 출시...M3 절반 가격"
+  // (35차 패널: 부제·수치 꼬리 금지 위반). 여기서 자르지 않고 재작성 큐로.
+  // 36차 재심 v3: 짧은 꼬리("...무료")도 감지 — 끝의 ... 뒤에 내용이 있으면 전부.
+  if (/\.\.\.\s*.+$/.test(item.title)) return true;
   if (hangulLen(item.takeaway) > 95) return true;
   if (LEAD_HINT.test(item.takeaway) && hangulLen(item.takeaway) > 55) return true;
   if (/해라|하라/.test(item.takeaway)) return true;
@@ -395,9 +475,18 @@ export function needsRewrite(
   // 16차: 힌트 검사는 시사점 사실 부분만 (할 일 상용구 오탐 방지).
   // 32차: polishGrade와 동일하게 hasStrongSignal 단일 기준으로 통일 (핑퐁 방지).
   if (item.grade === "important" && !hasStrongSignal(item.title, item.takeaway, item.originalTitle)) return true;
+  // 36차: NOTE_FORCE 강등 대상도 재작성 큐로 — 기존 과승격분(B01/B07/B08/B24류)이
+  // polishGrade에서 note로 내려가게. 없으면 영원히 [중요]로 잔류함.
+  if (item.grade === "important" && forceNoteReason(item.title, item.takeaway)) return true;
   // 승격: [참고]인데 강한 중요 신호가 있으면 재작성 → polishGrade 승격 로직이 적용됨
   // (기존 [참고] 기사는 승격 로직 배포 전 분류분이라 재작성이 필요)
-  if (item.grade === "note" && hasStrongSignal(item.title, item.takeaway, item.originalTitle))
+  // 36차 재심 (Codex): NOTE_FORCE 강등 대상은 승격 재작성에서 제외 — 강등 후에도
+  // 재작성 대상으로 남아 예산을 반복 소비하던 핑퐁 방지.
+  if (
+    item.grade === "note" &&
+    !forceNoteReason(item.title, item.takeaway) &&
+    hasStrongSignal(item.title, item.takeaway, item.originalTitle)
+  )
     return true;
   // 파편 시사점: 아티팩트 패턴이면 무조건 재작성 (길이 조건 제거 — Claude 발견: 파편은 짧아서 기존 조건에 안 걸림)
   // ",다.", "·" 시작, 조사/명사 단독 종결, 단어 중간 절단
@@ -414,7 +503,8 @@ export function needsRewrite(
   if (/(에|의|를|을|가|이|와|과|로|에서|에게|한테|보다|처럼)\.$/.test(takeaway)) return true;
   // 마지막 문장이 명사 단독으로 끝나면 파편 (예: "국산 챗봇.", "가격·성능.", "해당 지역.")
   // 단, 완결형 어미(다./요./필요./권장./검토./확인./점검.)로 끝나면 완결
-  const sentences = takeaway.split(/(?<=다\.|요\.|필요\.|검토\.|권장\.|확인\.|점검\.|주시\.|전망\.|기회\.)\s*/u);
+  // 36차: 가\.도 경계로 (polishTakeaway와 동일 — 3문장 시사점이 어미 검사를 우회하던 구멍)
+  const sentences = takeaway.split(/(?<=다\.|가\.|요\.|필요\.|검토\.|권장\.|확인\.|점검\.|주시\.|전망\.|기회\.)\s*/u);
   const lastSent = sentences[sentences.length - 1]?.trim() ?? "";
   if (lastSent && !/(다\.|요\.|필요\.|검토\.|권장\.|확인\.|점검\.|주시\.|전망\.|기회\.)$/.test(lastSent)) {
     // 마지막 문장이 완결 어미로 안 끝나면 파편 (길이 무관)
@@ -467,6 +557,13 @@ const TYPO_FIX: [RegExp, string][] = [
   [/제약가(?=\s|$)/g, "제약이"],
   [/스노우플레이스/g, "스노우플레이크"],
   [/칸바(?=[\s,·ㆍ:])/g, "캔바"],
+  // 36차: 35차 패널 발견 — "킴이"→키미 (원본 표기 Kimi K3.1(키미)), "스모그-네모트론"→스마우그-네모트론
+  // (Smaug는 /smaʊɡ/ — 스모그는 smog). 36차 재심: 킴이는 K3.1/모델/버전이 뒤따를 때만
+  // ("스티브 킴이" 인명 보호), 지미니는 "구글 지미니"일 때만, 토효율은 단독 단어일 때만.
+  [/구글 지미니/g, "구글 제미나이"],
+  [/(?<![가-힣])토효율(?![가-힣])/g, "토큰 효율"],
+  [/킴이(?=\s*[Kk]\d)/g, "키미"],
+  [/스모그-네모트론/gi, "스마우그-네모트론"],
 ];
 
 function fixTypos(s: string): string {
