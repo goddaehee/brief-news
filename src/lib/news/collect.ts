@@ -112,6 +112,8 @@ export async function collectOnce(): Promise<CollectResult> {
     }
 
     const runId = await beginRun();
+    // 34차: 제목 재시도 예산은 run 지역 객체로 (전역 변수 초기화 경합 방지 — Codex 재심)
+    const retryBudget: RetryBudget = { left: 12 };
     let fetched = 0;
     let inserted = 0;
     let skipped = 0;
@@ -120,14 +122,14 @@ export async function collectOnce(): Promise<CollectResult> {
       const existing = await listNews();
       // rewriteStale과 pullRss는 독립적이므로 병렬 실행 (Vercel 60초 제한 대응)
       const [rewritten, entries] = await Promise.all([
-        rewriteStale(existing),
+        rewriteStale(existing, retryBudget),
         pullRss(),
       ]);
       // rewriteStale이 삭제/업데이트했을 수 있으므로 최신 피드로 다시 조회 후 중복 정리 (P2)
       const deduped = await dedupeExisting(await listNews());
       fetched = entries.length;
       const fresh: RawEntry[] = [];
-      const newCap = rewritten > 0 ? Math.min(3, COLLECT_MAX_NEW) : COLLECT_MAX_NEW;
+      const newCap = rewritten > 0 ? Math.min(5, COLLECT_MAX_NEW) : COLLECT_MAX_NEW;
       // DB 쿼리 대신 메모리의 existing Set으로 중복 체크 (순차 DB 왕복 제거)
       const existingUrls = new Set(existing.filter((i) => !isSeedItem(i)).map((i) => i.sourceUrl));
       const existingItems = existing.filter((i) => !isSeedItem(i));
@@ -137,9 +139,9 @@ export async function collectOnce(): Promise<CollectResult> {
       for (const item of existingItems) {
         sourceCounts.set(item.source, (sourceCounts.get(item.source) ?? 0) + 1);
       }
-      // P0-2: 컷오프는 분류 뒤로 이동. 후보를 넉넉히(최대 15건·소스당 최대 2건) 수집 → 전원 분류 → keep=true 중 상위 newCap건만 편입
-      const BATCH_MAX = 15;
-      const BATCH_SOURCE_CAP = 2;
+      // P0-2: 컷오프는 분류 뒤로 이동. 후보를 넉넉히(최대 24건·소스당 최대 3건) 수집 → 전원 분류 → keep=true 중 상위 newCap건만 편입
+      const BATCH_MAX = 24;
+      const BATCH_SOURCE_CAP = 3;
       const batchSourceCounts = new Map<string, number>();
       for (const e of entries) {
         if (existingUrls.has(e.sourceUrl)) {
@@ -152,7 +154,7 @@ export async function collectOnce(): Promise<CollectResult> {
           skipped += 1;
           continue;
         }
-        // 배치 내 소스당 최대 2건 — 고순위 소스(AI타임스 등)의 슬롯 독점 방지
+        // 배치 내 소스당 최대 3건 — 고순위 소스(AI타임스 등)의 슬롯 독점 방지
         const batchCount = batchSourceCounts.get(e.source) ?? 0;
         if (batchCount >= BATCH_SOURCE_CAP) {
           skipped += 1;
@@ -185,7 +187,7 @@ export async function collectOnce(): Promise<CollectResult> {
         }),
       );
 
-      const classified = await Promise.all(fresh.map((entry) => classifyEntry(entry)));
+      const classified = await Promise.all(fresh.map((entry) => classifyEntry(entry, retryBudget)));
       for (const payload of classified) {
         if (payload.keep === false) {
           skipped += 1;
@@ -257,6 +259,7 @@ type RawEntry = {
   date: number;
   summary: string;
   titleMustMatch?: boolean;
+  secTitleHint?: boolean;
 };
 
 /** P0-1: RSS에 description이 없는 기사는 본문 첫 ~500자를 발췌 (제목만 보고 탈락 방지). 실패 시 "" 반환. */
@@ -283,9 +286,17 @@ async function fetchArticleLede(url: string): Promise<string> {
   }
 }
 
+// 34차: 보안 와이어 전용 제목 힌트 — AI/LLM 신호가 제목에 없으면 제외.
+// Codex 반례 반영: 부분 문자열 "ai"(Daily·Airdrop·chain)와 일반 "API"/"agent"
+// 단독 통과를 막기 위해 토큰 경계·제품명 목록으로 판정한다. "LiteLLM"·"Ollama"
+// 같은 제품명은 명시 포함.
+export const SEC_TITLE_HINT =
+  /\b(ai|llm|gpt|mcp)\b|agentic|ai agent|machine learning|claude|gemini|openai|anthropic|chatgpt|litellm|ollama|langchain|hugging|deepseek|copilot|에이전트|인공지능|챗봇|딥러닝|머신러닝|생성형/i;
+
 function keepEntry(e: RawEntry): boolean {
   if (SKIP_HINT.test(e.title) || SKIP_HINT.test(e.summary)) return false;
   if (isVendorCustomerStory(e)) return false;
+  if (e.secTitleHint && !SEC_TITLE_HINT.test(e.title)) return false;
   const target = e.titleMustMatch ? e.title : `${e.title} ${e.summary}`;
   return AI_HINT.test(target);
 }
@@ -318,6 +329,7 @@ async function pullRss(): Promise<RawEntry[]> {
           date: e.date,
           summary: e.summary,
           titleMustMatch: Boolean(src.titleMustMatch),
+          secTitleHint: Boolean(src.secTitleHint),
         }));
       } catch {
         return [] as RawEntry[];
@@ -496,12 +508,12 @@ function sharesTopicAnchor(a: string, b: string, da?: number, db?: number): bool
   return common.some((t) => /^[a-z]{3,}$/.test(t));
 }
 
-async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>): Promise<number> {
+async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>, budget?: RetryBudget): Promise<number> {
   if (!resolveLlm()) return 0;
   // 24차 P0: 오타/파편을 일반 stale보다 먼저 처리 — "앤스로픽"이 3라운드 정체된 원인.
   // needsRewrite는 통과하는데 큐 앞에서 밀려서 처리 안 됨.
   // 28차: 노려는 추가 (TYPO_HINT와 일치)
-  const typoHint = /앤스로픽|펌웨다|현실회(?![복피])|&(quot|amp|apos|lt|gt|#\d+);|챗\(클로드\)|노려는|시크릟|(?<=\s)대익(?=\s)/;
+  const typoHint = /앤스로픽|펌웨다|현실회(?![복피])|&(quot|amp|apos|lt|gt|#\d+);|챗\(클로드\)|노려는|시크릟|제약가(?=\s|$)|스노우플레이스|(?<=\s)대익(?=\s)/;
   const stale = existing
     .filter((i) => !isSeedItem(i) && needsRewrite(i))
     .sort((a, b) => {
@@ -522,7 +534,7 @@ async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>): Pro
         source: item.source,
         date: item.publishedAt,
         summary: item.summary,
-      });
+      }, budget);
       if (payload.keep === false) {
         return (await deleteItem(item.id)) ? 1 : 0;
       }
@@ -704,7 +716,11 @@ async function dedupeExisting(existing: NewsItem[]): Promise<number> {
   return deleted;
 }
 
-async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
+// 34차: 제목 하한 재시도의 run당 총량 상한 (호출 예산 통제 — Codex 재심).
+// 전역 변수가 아니라 진입 함수가 만든 지역 객체를 호출 경로로 전달한다.
+type RetryBudget = { left: number };
+
+async function classifyEntry(entry: RawEntry, budget?: RetryBudget): Promise<IngestPayload> {
   if (shouldDrop(entry.title, entry.summary)) {
     return { ...fallbackPayload(entry), keep: false };
   }
@@ -722,6 +738,26 @@ async function classifyEntry(entry: RawEntry): Promise<IngestPayload> {
   const payload = polishPayload(json, entry);
   if (shouldDrop(payload.title, payload.summary)) {
     return { ...payload, keep: false };
+  }
+  // 34차: 제목 하한 재시도 — 33차 패널: 28자 미만 25%. 생성 모델이 짧게 쓰는
+  // 경향이 있어, 하한 미달이면 결함을 명시해 1회만 다시 분류한다.
+  // Codex 재심 반영: 채택 조건은 "더 길다"가 아니라 하한 충족(코드포인트
+  // 28자 이상)일 때만. run당 재시도 총량 상한으로 호출 예산도 통제한다.
+  if ([...payload.title].length < 28 && budget && budget.left > 0) {
+    budget.left -= 1;
+    const retryJson = await chatJson({
+      system: DESK_SYSTEM,
+      user: `${deskUser(entry)}\n\n[재작성 지시] 직전 제목 "${payload.title}"은(는) ${[...payload.title].length}자로 28자 하한에 못 미친다. 같은 사실을 유지하되 주어·대상·수치·범위 같은 구체 맥락을 원문에서 보강해 제목을 28~44자로 다시 쓰고, 시사점과 요약도 함께 다시 출력하라.`,
+    });
+    if (retryJson && retryJson.keep !== false) {
+      const retryPayload = polishPayload(retryJson, entry);
+      if (
+        [...retryPayload.title].length >= 28 &&
+        !shouldDrop(retryPayload.title, retryPayload.summary)
+      ) {
+        return retryPayload;
+      }
+    }
   }
   return payload;
 }
@@ -825,6 +861,7 @@ function isEnglishDominant(s: string): boolean {
 }
 
 export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted: number; skipped: number }> {
+  const retryBudget: RetryBudget = { left: 12 };
   await ensureSeeded();
   // P0: RSS 수집 경로와 동일한 중복 검사. X 보충 수집이 볼륨을 키우기 전 구멍 봉쇄.
   // (X 배치는 건수가 적어 전체 조회 부담이 작다)
@@ -869,7 +906,7 @@ export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted
         source: item.source,
         date: item.publishedAt ?? Date.now(),
         summary: item.summary || item.takeaway || "",
-      });
+      }, retryBudget);
       // 강제 재작성 경로에서는 데스크가 실제로 다시 쓴 경우(keep===true)에만 입고한다.
       // LLM 실패 폴백(keep 필드 없음)·드롭 판정·결과가 여전히 영문이면 넣지 않는다 —
       // 게이트가 오히려 새 영문 노출 통로가 되는 것 방지 (29차 크로스 리뷰 블로커).
