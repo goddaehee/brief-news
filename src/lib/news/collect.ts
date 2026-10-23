@@ -391,12 +391,14 @@ function normalizeProductNames(s: string): string {
     // 36차: 35차 킴이/키미 K3.1 중복 쌍. 36차 재심 (Codex): 인명 오정규화 방지 —
     // 킴이는 K3.1/모델/버전이 뒤따를 때만 ("스티브 킴이" 보호), 키미는 표준 표기라 전역.
     // 스모그는 "-네모트론"이 뒤따를 때만 (Smaug 제품 문맥 — "스모그 예측 AI" 보호).
-    [/킴이(?=\s*[Kk]\d)/gi, "kimi"],  // 36차 재심 v3: K+숫자만 ("스티브 킴이 모델" 반례)
+    [/킴이(?=\s*['"‘’“”]?\s*[Kk]\d)/gi, "kimi"],  // 36차 재심 v3: K+숫자만. 36차 실측: 따옴표 허용
     [/키미/gi, "kimi"],
     [/스모그(?=-?네모트론)/gi, "smaug"],
     [/스마우그/gi, "smaug"],
     // 36차: 네모트론 ↔ Nemotron — "스모그-네모트론" vs "Smaug-Nemotron" 쌍.
     [/네모트론/gi, "nemotron"],
+    // 36차 실측: "에이16지, 크립토 펀드 '프론티어'" vs "a16z, 크립토 조직 '프론티어'" 중복 쌍
+    [/에이16지/gi, "a16z"],
     [/엔비디아/gi, "nvidia"],
     [/구글/gi, "google"],
     [/마이크로소프트/gi, "microsoft"],
@@ -424,8 +426,9 @@ const DISPLAY_NAME_MAP: [RegExp, string][] = [
   [/시크릟/g, "시크릿"],
   // 36차: 35차 패널 발견분 (X 경로 중복 비교 전 정규화용 — fixTypos와 동일 교정).
   // 36차 재심: 제품 문맥 한정 (desk.ts TYPO_FIX와 동일 가드).
-  [/킴이(?=\s*[Kk]\d)/g, "키미"],
+  [/킴이(?=\s*['"‘’“”]?\s*[Kk]\d)/g, "키미"],
   [/구글 지미니/g, "구글 제미나이"],
+  [/지미니(?=\s*(,|지도|검색|캘린더|앱|구글|기능|$))/g, "제미나이"],
 ];
 
 function normalizeDisplayNames(s: string): string {
@@ -472,7 +475,7 @@ export function tooSimilar(a: string, b: string, da?: number, db?: number): bool
     // 36차 재심 v3: 독립 버전 토큰(v2·k3·4o)은 겹침 수에서 제외
     // ("구글, 'Gemma' v2 공개" vs "구글, 'Imagen' v2 공개"가 {구글, v2, 공개}로 오탐).
     // 제품 결합형(kimik3·gemmav2)은 제외 대상이 아님 — 앵커 경로와 동일 기준.
-    for (const t of ta) if (tb.has(t) && !/^[a-z]?\d[\w.]*$/i.test(t)) inter += 1;
+    for (const t of ta) if (tb.has(t) && !/^(?!a16z$)[a-z]?\d[\w.]*$/i.test(t)) inter += 1;
     if (inter >= 3 && inter / Math.min(ta.size, tb.size) >= 0.6) return true;
     // 32차 메모: 비율 완화(0.5)는 시도했으나 "삼성전자·SK하이닉스 HBM 가격 인상" vs
     // "…생산시설 투자 확대"(공유 4·0.57) 같은 다른 사건 쌍을 오인해 철회.
@@ -529,7 +532,7 @@ function sharesTopicAnchor(a: string, b: string, da?: number, db?: number): bool
   // 36차 재심 v3: 독립 버전 토큰(v2·k3·3.5)은 공통 앵커 수에서 제외.
   // "구글, 'Gemma' v2" vs "구글, 'Imagen' v2"는 공통이 {google} 1개가 되어 오탐 방지.
   // 제품 결합형(kimik3·gemmav2)은 제외 대상이 아님.
-  const VERSION_TOKEN = /^[a-z]?\d[\w.]*$/i;  // 36차 재심 v4: k3 포함
+  const VERSION_TOKEN = /^(?!a16z$)[a-z]?\d[\w.]*$/i;  // 36차 실측 후속: a16z만 예외 (k3.1·r10·o3mini 회귀 방지)
   const common = [...A].filter((t) => B.has(t) && !VERSION_TOKEN.test(t));
   if (common.length < 2) return false;
   // 일반 명사 2개가 앵커를 채우는 오탐 방지: 최소 1개는 영문 고유명사(회사·제품명)
@@ -539,7 +542,7 @@ function sharesTopicAnchor(a: string, b: string, da?: number, db?: number): bool
   // 여전히 필수이므로 "sk"+"hbm4" 같은 파편 조합으로는 오탐되지 않음.
   // ForTy 쌍은 normalizeProductNames(딥마인드→deepmind, 포티→forty) 덕에
   // tooSimilar 토큰 경로(공유 5개·0.71)로 잡히므로 앵커 규칙은 보수적으로 유지.
-  return common.some((t) => /^[a-z]{3,}$/.test(t));
+  return common.some((t) => /^(a16z|[a-z]{3,})$/.test(t));  // 36차 실측 후속: a16z만 예외 (32차 sk·hbm4 가드 유지)
 }
 
 async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>, budget?: RetryBudget): Promise<number> {
@@ -548,7 +551,7 @@ async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>, budg
   // needsRewrite는 통과하는데 큐 앞에서 밀려서 처리 안 됨.
   // 28차: 노려는 추가 (TYPO_HINT와 일치)
   // 36차: 35차 패널 발견분 추가. 36차 재심: desk.ts TYPO_HINT와 동일 가드 (인명·일반명사 보호).
-  const typoHint = /앤스로픽|펌웨다|현실회(?![복피])|&(quot|amp|apos|lt|gt|#\d+);|챗\(클로드\)|노려는|시크릟|제약가(?=\s|$)|스노우플레이스|(?<=\s)대익(?=\s)|구글 지미니|(?<![가-힣])토효율(?![가-힣])|킴이(?=\s*[Kk]\d)|칸바(?=[\s,·ㆍ:])|스모그-네모트론/i;
+  const typoHint = /앤스로픽|펌웨다|현실회(?![복피])|&(quot|amp|apos|lt|gt|#\d+);|챗\(클로드\)|노려는|시크릟|제약가(?=\s|$)|스노우플레이스|(?<=\s)대익(?=\s)|구글 지미니|지미니(?=\s*(,|지도|검색|캘린더|앱|구글|기능|$))|(?<![가-힣])토효율(?![가-힣])|킴이(?=\s*['"‘’“”]?\s*[Kk]\d)|칸바(?=[\s,·ㆍ:])|스모그-네모트론/i;
   const stale = existing
     .filter((i) => !isSeedItem(i) && needsRewrite(i))
     .sort((a, b) => {
