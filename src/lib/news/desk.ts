@@ -7,6 +7,11 @@ export const ALLOWED_TOPICS = Object.keys(TOPIC_MAP);
 export const DROP_HINT =
   /만찬|국빈|동행|시상식|포토\s*뉴스|오늘의 인물|출근길|레드카펫|기념촬영|개막식 참석/i;
 
+/** 제목 전용 잡음 패턴 (32차, 31차 패널). summary에 같은 단어가 있어도
+ *  본문이 실무 내용일 수 있어 제목에만 적용한다. */
+const TITLE_DROP_HINT =
+  /산업대전|(박람회|엑스포)\s*(개막|개최)|신용시설|전환사채|회사채 발행|적자 현금흐름|분기 실적 발표|(골드만|모건스탠리|JP모건).{0,24}(전망|목표주가)/i;
+
 /** Pipeline-now. Name-drops (출시·연구소) are 참고. */
 /** 5차 평가: [중요] 7.5% 과소 (목표 12-18%). 힌트를 약간 복원.
  *  일반 출시/발표/협력은 제외 유지, 주요 모델 출시·보안 경고·대규모 계약 추가. */
@@ -20,9 +25,9 @@ const CEREMONY_GUARD = /출범|연구소|연구센터|개소식|기념식/;
  *  예: "Anthropic IPO 로드쇼", "DeepSeek 3시간 장애", "오픈AI, GPT-6 아스트라 출시"
  *  LAB의 모델명은 버전 번호가 붙은 것만 포함 — "GPT 탑재 챗봇 출시" 같은 bare 언급은 과승격 방지. */
 const FRONTIER_LAB =
-  /오픈AI|OpenAI|앤트로픽|Anthropic|구글|Google|딥마인드|DeepMind|제미나이|Gemini|딥시크|DeepSeek|xAI|그록|Grok|메타|Meta|라마|Llama|미스트랄|Mistral|엔비디아|NVIDIA|GPT-?\d|Gemini ?\d|Claude ?\d|Grok ?\d|LFM ?\d|Nemotron|Muse|Wonder|Argon|Qwen|Gemma/i;
+  /오픈AI|OpenAI|앤트로픽|Anthropic|클로드|구글|Google|딥마인드|DeepMind|제미나이|Gemini|딥시크|DeepSeek|xAI|그록|Grok|메타|Meta|라마|Llama|미스트랄|Mistral|엔비디아|NVIDIA|GPT-?\d|Gemini ?\d|Claude ?\d|Grok ?\d|LFM ?\d|Nemotron|Muse|Wonder|Argon|Qwen|Gemma/i;
 const FRONTIER_EVENT =
-  /출시|공개|발표|지원 시작|벤치마크|벤치|평가|1위|신기록|돌파|경신|98점|99점|100점|IPO|상장|매출|실적|장애|다운|단종|가격|인하|인상|launch(?:es|ed)?|releases?d?|unveil(?:s|ed)?|announces?d?|outage|benchmark/i;
+  /출시|공개|발표|지원 시작|기본 적용|기본값|벤치마크|벤치|평가|1위|신기록|돌파|경신|98점|99점|100점|IPO|상장|매출|실적|장애|다운|단종|가격|인하|인상|launch(?:es|ed)?|releases?d?|unveil(?:s|ed)?|announces?d?|outage|benchmark/i;
 
 // 원제목 단독 승격용 강한 출시 신호 (29차 크로스 리뷰: announce/발표 같은 약한 신호는 제외 —
 // "OpenAI announces partnership" 류 협력 발표가 원제목만으로 승격되는 과승격 재현됨)
@@ -80,8 +85,8 @@ export const DESK_SYSTEM = `당신은 한국 AI 실무자용 뉴스 터미널 br
 - 정확히 두 조각: "사실 한 줄. 할 일 한 줄."
 - 첫 문장(사실)은 제목을 베껴쓰지 말고 해석을 얹을 것. 예: 제목이 "오픈AI 엔지니어 체포"라면 "내부자 위협 현실화."처럼 사건에 프레임을 씌울 것. "엔지니어가 체포됐다"는 리드 복사에 불과.
 - 할 일은 구체적 행동으로: 누가 무엇을 해야 하는지 명시 ("도입 전 가격 비교 권장", "API 사용 중이면 폴백 로직 점검 필요").
-- 금지: "~주시 필요", "~동향 주시", "~영향 주시", "~검토할 시점", "~검증해볼 시점", "~참고할 만함" 같은 관망형·모호한 어미. 막연한 표현으로 끝내지 말 것. 할 일 문장은 반드시 필요/권장/검토/확인/점검 중 하나로 끝낼 것.
-- 제품·모델명은 영문 병기: "Maia(마이아)", "Claude Code(클로드 코드)".
+- 금지: "~주시 필요", "~동향 주시", "~영향 주시", "~검토할 시점", "~검증해볼 시점", "~참고할 만함" 같은 관망형·모호한 어미. 막연한 표현으로 끝내지 말 것. 할 일 문장은 반드시 필요/검토/권장/주시/기회 중 하나로 끝낼 것. "확인."·"점검."으로만 끝내는 미완결 종결 금지 ("확인 필요"처럼 필요를 붙일 것).
+- 제품·모델명은 한글 표기를 우선한다. 영문만으로 널리 쓰이는 이름(GPT-5, API 등)은 영문 그대로 쓴다. '영문(한글)' 병기는 쓰지 않는다.
 - 원문 첫 문장·리드 복사 금지. 명령조(해라·하라) 금지.
 - 에디토리얼 프레임: 사건에 의미를 부여하는 한 단어를 첫 문장에 넣을 것.
   - 파산/몰락: "활성 1200만 서비스도 수익성·안전 소송에 무너져." (X: "파산 보호를 신청하고 매각을 추진 중")
@@ -178,6 +183,11 @@ export function polishTakeaway(raw: string): string {
     // 21차 루프3: GLM 괄호 아티팩트 정리 — 라틴괄호 제거보다 먼저 처리
     // "챗(클로드) 안에서" → "클로드 안에서". "Maia(마이아)"는 [가-힣]+에 안 걸려서 보존.
     .replace(/챗\((클로드|GPT)\)/g, "$1")
+    // 32차: 확인된 병기 쌍만 한글로 (31차 패널 지적 2건).
+    // 일반 규칙으로 "GPT-5(지피티)"까지 지우면 제품명이 사라져(크로스 리뷰)
+    // 알려진 쌍만 맵으로 변환하고 나머지는 건드리지 않는다.
+    .replace(/Claude Code\(클로드 코드\)/g, "클로드 코드")
+    .replace(/Railway\(레일웨이\)/g, "레일웨이")
     .replace(/([가-힣]+)\(\1\)/g, "$1") // "인공지능(인공지능)" 같은 중복 제거
     .replace(/\([^)]*[A-Za-z][^)]*\)/g, "")
     .replace(/[A-Za-z]{3,}·[A-Za-z]{3,}/g, "")
@@ -297,6 +307,13 @@ export function polishTakeaway(raw: string): string {
       if (!/[.다함음요]$/.test(t)) t += ".";
     }
   }
+  // 32차: bare "확인."/"점검." 종결을 저장 전에 완결형으로 (크로스 리뷰:
+  // 교정 없이 needsRewrite만 켜면 재작성 큐에서 같은 항목이 반복된다).
+  // X 경로의 fixBareEnding과 동일 규칙을 데스크 패스에도 적용.
+  t = t.replace(
+    /(?<!필요|권장|검토|주시|기회)\s*(확인|점검)\.\s*$/,
+    (m, verb) => ` ${verb} 필요.`,
+  ).trim();
   return t;
 }
 
@@ -304,22 +321,35 @@ export function polishGrade(grade: Grade, title: string, takeaway: string, origi
   // 16차: 승격 게이트는 제목 + 시사점 사실 부분만 본다 (할 일 상용구 오탐 방지)
   const t = `${title} ${factPart(takeaway)}`;
   if (grade === "breaking" && !/장애|다운|중단|지연|가격|인하|인상/.test(t)) return "note";
-  // 강등: LLM이 important로 매겼어도 힌트 미매치 → note
-  // (15차 리뷰: 여기서 바로 return 하지 않고 아래 승격 검사로 흘려보낸다 — 힌트는 양방향 게이트)
+  // 32차: 강등·승격 모두 hasStrongSignal 단일 기준으로 통일.
+  // 기존 IMPORTANT_HINT는 "규제·정책·법안" 같은 약한 단어만으로도 [중요]를 유지시켜
+  // 주장성 기사(휴깅페이스 "규제 산업 전환 가속")가 과승격됐다 (31차 패널).
   let g = grade;
-  if (g === "important" && !IMPORTANT_HINT.test(t)) g = "note";
-  // 승격: LLM이 note로 매겼어도 강한 중요 신호가 있으면 important로 승격
-  // (강등된 important도 여기서 구제됨 — 대칭 게이트)
-  // 15차 평가: 프런티어 모델 출시·벤치마크·실적도 승격 (promppy [중요] 커버리지 대응)
-  // 의식/행사성 제외 가드는 isFrontierEvent 내부에만 — 리스크 경로는 막지 않는다
-  if (g === "note" && (IMPORTANT_HINT.test(t) || isFrontierEvent(title, takeaway, originalTitle))) {
-    return "important";
-  }
+  if (g === "important" && !hasStrongSignal(title, takeaway, originalTitle)) g = "note";
+  if (g === "note" && hasStrongSignal(title, takeaway, originalTitle)) return "important";
   return g;
 }
 
+/** 강한 중요 신호 (32차). 약한 정책 단어(규제·정책·법안·가이드라인 단독)는 제외.
+ *  데이터셋·지도 공개는 리스크 신호가 동반될 때만 중요 후보가 된다
+ *  (31차: 딥마인드 ForTy 삼림 지도 — 무료 데이터 공개가 [중요]로 과승격). */
+const STRONG_HINT =
+  /가격|인하|인상|침해|장애|중단|제재|유출|다운|수출 통제|계정 탈취|출시 연기|취약점|해킹|공격|소송|소환장|벌금|과징금|리콜|반독점|대규모 계약|대규모 투자|인수|합병|오픈소스 공개|벤치마크|신모델 출시|신모델 공개|신기록|주요 모델 출시|보안 경고|사이버 공격|AI 자가복제|웜|파산|상장|IPO|법안 통과/;
+const DATASET_RELEASE = /지도|데이터셋|데이터 세트|말뭉치|코퍼스/;
+const RISK_HINT = /침해|유출|장애|중단|가격|인하|인상|제재|소송|소환장|취약점|해킹|공격|연기|단종|벌금|과징금|리콜/;
+
+export function hasStrongSignal(title: string, takeaway: string, originalTitle = ""): boolean {
+  const t = `${title} ${factPart(takeaway)}`;
+  if (STRONG_HINT.test(t)) return true;
+  // 데이터셋·지도 공개는 그 자체(프런티어 이벤트 경로)만으로 승격하지 않는다.
+  // 단, 법안 통과·제재 같은 명시적 강한 신호가 있으면 그 경로는 그대로 인정
+  // (32차 크로스 리뷰: "데이터셋 공개 의무화 법안 통과"까지 막는 모순 교정).
+  if (DATASET_RELEASE.test(title) && !RISK_HINT.test(t)) return false;
+  return isFrontierEvent(title, takeaway, originalTitle);
+}
+
 export function shouldDrop(title: string, summary: string): boolean {
-  return DROP_HINT.test(title) || DROP_HINT.test(summary);
+  return DROP_HINT.test(title) || DROP_HINT.test(summary) || TITLE_DROP_HINT.test(title);
 }
 
 // 단어 중간 절단 아티팩트 (LLM이 음절을 떨어뜨린 경우 — 예: "펌웨어다" → "펌웨다", "현실화" → "현실회")
@@ -347,26 +377,25 @@ const ENTITY_HINT = /&(quot|amp|apos|lt|gt|#\d+);/;
 // 27차: "노려는" 추가 — X 경로 기존 기사 처리용.
 // 29차: "대익" 추가 — Grok 발견: "보안 위협 대익 자동화" (대응 오기).
 // 단독 단어로 공백 사이에 있을 때만 — "김대익" 같은 인명 오교정 방지 (29차 크로스 리뷰 재현).
-const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)|노려는|(?<=\s)대익(?=\s)/;
+const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)|노려는|시크릟|(?<=\s)대익(?=\s)/;
 
 export function needsRewrite(
   item: Pick<NewsItem, "title" | "takeaway" | "summary" | "grade" | "originalTitle">,
 ): boolean {
   if (shouldDrop(item.title, item.summary)) return true;
   if (hangulLen(item.title) > 46) return true;
+  // 32차: 제목 하한 (31차 패널: 28자 미만 12건). 데스크 규격 28~44자.
+  if (hangulLen(item.title) < 27) return true;
   if (hangulLen(item.takeaway) > 95) return true;
   if (LEAD_HINT.test(item.takeaway) && hangulLen(item.takeaway) > 55) return true;
   if (/해라|하라/.test(item.takeaway)) return true;
   if (/[A-Za-z]{4,}·[A-Za-z]{4,}/.test(item.takeaway)) return true;
   // 16차: 힌트 검사는 시사점 사실 부분만 (할 일 상용구 오탐 방지).
-  // 프런티어 승격분(로봇팔 벤치, 베라 CPU 랙)도 힌트로 인정 — 매 수집마다 재작성 방지.
-  const ttw = `${item.title} ${factPart(item.takeaway)}`;
-  if (item.grade === "important" && !(IMPORTANT_HINT.test(ttw) || isFrontierEvent(item.title, item.takeaway, item.originalTitle))) return true;
+  // 32차: polishGrade와 동일하게 hasStrongSignal 단일 기준으로 통일 (핑퐁 방지).
+  if (item.grade === "important" && !hasStrongSignal(item.title, item.takeaway, item.originalTitle)) return true;
   // 승격: [참고]인데 강한 중요 신호가 있으면 재작성 → polishGrade 승격 로직이 적용됨
   // (기존 [참고] 기사는 승격 로직 배포 전 분류분이라 재작성이 필요)
-  // 15차 평가: 프런티어 이벤트도 승격 대상 ([중요] 커버리지)
-  // (15차 리뷰: 의식/행사성 제외 가드는 isFrontierEvent 내부에만 — 리스크 경로는 막지 않는다)
-  if (item.grade === "note" && (IMPORTANT_HINT.test(ttw) || isFrontierEvent(item.title, item.takeaway, item.originalTitle)))
+  if (item.grade === "note" && hasStrongSignal(item.title, item.takeaway, item.originalTitle))
     return true;
   // 파편 시사점: 아티팩트 패턴이면 무조건 재작성 (길이 조건 제거 — Claude 발견: 파편은 짧아서 기존 조건에 안 걸림)
   // ",다.", "·" 시작, 조사/명사 단독 종결, 단어 중간 절단
@@ -392,9 +421,12 @@ export function needsRewrite(
       return true;
     }
   }
-  // 20차: 시사점 마지막 문장이 할 일 어미(필요/권장/검토/확인/점검/주시/기회)로 끝나지 않으면 재작성
+  // 20차: 시사점 마지막 문장이 할 일 어미로 끝나지 않으면 재작성
   // "…몰릴 수 있다.", "…진입.", "…해야 한다." 같은 사실 서술형 결말 방지
-  if (lastSent && !/(필요|권장|검토|확인|점검|주시|기회)\.$/.test(lastSent)) return true;
+  // 32차: 허용 어미를 AGENTS.md 기준 5종(필요/검토/권장/주시/기회)으로 통일.
+  // bare "확인."/"점검."은 미완결로 본다 (31차 패널: 어미 위반 3건이 전부 이 케이스).
+  // "확인 필요."처럼 필요로 끝나면 통과한다.
+  if (lastSent && !/(필요|검토|권장|주시|기회)\.$/.test(lastSent)) return true;
   // 21차 루프3: bare "점검."/"확인." + 조건문(면/거든/다면) → 미완결로 보고 재작성
   // "있다면 … 점검." (미완결) vs "보안 설정을 재점검." (정상)
   // (?![을를이가은는의에로와과도만]) — "화면을/화면에서" 같은 명사+조사 오탐 방지
@@ -421,6 +453,8 @@ const TYPO_FIX: [RegExp, string][] = [
   // 29차: Grok 발견 "대익" → "대응" ("보안 위협 대익 자동화").
   // 공백 사이의 단독 사용만 교정 — 인명("김대익") 오교정 방지.
   [/(?<=\s)대익(?=\s)/g, "대응"],
+  // 31차: 패널 발견 "시크릟" → "시크릿" (레일웨이 유출 기사 시사점).
+  [/시크릟/g, "시크릿"],
 ];
 
 function fixTypos(s: string): string {
