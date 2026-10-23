@@ -42,7 +42,8 @@ export function FilterBar({
             aria-pressed={active}
             onClick={() => onChange(tab.key)}
             className={cn(
-              "rounded-full px-3 py-1 font-mono-ts text-xs transition-colors",
+              // 36차: 모바일에서 탭 라벨이 글자 단위로 줄바꿈되던 문제 수정 (35차 Claude)
+              "shrink-0 whitespace-nowrap rounded-full px-3 py-1 font-mono-ts text-xs transition-colors",
               active
                 ? "bg-white/10 text-white shadow-[inset_0_-2px_0_#e6edf3]"
                 : "text-muted hover:bg-white/[0.04] hover:text-fg",
