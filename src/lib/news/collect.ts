@@ -369,6 +369,12 @@ function normalizeProductNames(s: string): string {
     [/앤스로픽/gi, "anthropic"],
     [/앤트로픽/gi, "anthropic"],
     [/딥시크/gi, "deepseek"],
+    [/딥마인드/gi, "deepmind"],
+    [/휴깅페이스/gi, "huggingface"],
+    [/허깅페이스/gi, "huggingface"],
+    [/스페이스x/gi, "spacex"],
+    // 32차: 음역-원어 쌍 (31차 ForTy 중복 쌍: '포티' vs 'ForTy')
+    [/포티/gi, "forty"],
     [/아르곤/gi, "argon"],
     [/엔비디아/gi, "nvidia"],
     [/구글/gi, "google"],
@@ -392,6 +398,9 @@ function normalizeProductNames(s: string): string {
 // 17차 P0: X @Reuters 신규 기사의 "앤스로픽" 오타 재유입 대응.
 const DISPLAY_NAME_MAP: [RegExp, string][] = [
   [/앤스로픽/gi, "앤트로픽"],
+  // 32차: 표기 통일 (31차 Grok: 같은 회사가 휴깅/허깅으로 갈림) + 오타 즉시 교정
+  [/휴깅페이스/gi, "허깅페이스"],
+  [/시크릟/g, "시크릿"],
 ];
 
 function normalizeDisplayNames(s: string): string {
@@ -410,7 +419,7 @@ function fixBareEnding(s: string): string {
   ).trim();
 }
 
-function tooSimilar(a: string, b: string, da?: number, db?: number): boolean {
+export function tooSimilar(a: string, b: string, da?: number, db?: number): boolean {
   const fa = foldTitle(a);
   const fb = foldTitle(b);
   if (!fa || !fb) return false;
@@ -434,6 +443,10 @@ function tooSimilar(a: string, b: string, da?: number, db?: number): boolean {
     let inter = 0;
     for (const t of ta) if (tb.has(t)) inter += 1;
     if (inter >= 3 && inter / Math.min(ta.size, tb.size) >= 0.6) return true;
+    // 32차 메모: 비율 완화(0.5)는 시도했으나 "삼성전자·SK하이닉스 HBM 가격 인상" vs
+    // "…생산시설 투자 확대"(공유 4·0.57) 같은 다른 사건 쌍을 오인해 철회.
+    // ForTy 쌍은 normalizeProductNames 확장(딥마인드→deepmind, 포티→forty)으로
+    // 공유 5개·0.71이 되어 기존 0.6 기준으로 잡힌다.
   }
   return false;
 }
@@ -476,7 +489,11 @@ function sharesTopicAnchor(a: string, b: string, da?: number, db?: number): bool
   const common = [...A].filter((t) => B.has(t));
   if (common.length < 2) return false;
   // 일반 명사 2개가 앵커를 채우는 오탐 방지: 최소 1개는 영문 고유명사(회사·제품명)
-  return common.some((t) => /^[a-z]+$/.test(t));
+  // 32차: 영문 앵커는 3자 이상만 인정 — "SK하이닉스"에서 잘린 "sk" 같은
+  // 혼합 표기 파편이 앵커로 세는 오탐 차단 (크로스 리뷰 반례).
+  // ForTy 쌍은 normalizeProductNames(딥마인드→deepmind, 포티→forty) 덕에
+  // tooSimilar 토큰 경로(공유 5개·0.71)로 잡히므로 앵커 규칙은 보수적으로 유지.
+  return common.some((t) => /^[a-z]{3,}$/.test(t));
 }
 
 async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>): Promise<number> {
@@ -484,7 +501,7 @@ async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>): Pro
   // 24차 P0: 오타/파편을 일반 stale보다 먼저 처리 — "앤스로픽"이 3라운드 정체된 원인.
   // needsRewrite는 통과하는데 큐 앞에서 밀려서 처리 안 됨.
   // 28차: 노려는 추가 (TYPO_HINT와 일치)
-  const typoHint = /앤스로픽|펌웨다|현실회(?![복피])|&(quot|amp|apos|lt|gt|#\d+);|챗\(클로드\)|노려는|(?<=\s)대익(?=\s)/;
+  const typoHint = /앤스로픽|펌웨다|현실회(?![복피])|&(quot|amp|apos|lt|gt|#\d+);|챗\(클로드\)|노려는|시크릟|(?<=\s)대익(?=\s)/;
   const stale = existing
     .filter((i) => !isSeedItem(i) && needsRewrite(i))
     .sort((a, b) => {
