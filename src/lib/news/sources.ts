@@ -89,6 +89,11 @@ export const NEWS_SOURCES: NewsSource[] = [
     rank: 7,
   },
   { id: "simonw", name: "Simon Willison", rss: "https://simonwillison.net/atom/everything/", rank: 6 },
+  // 32차: 보안·공급망 전문매체 (31차 패널: LiteLLM·DaisyUI-MCP 같은 공급망
+  // 악성코드 [중요]를 통째로 놓침). Reddit RSS는 서버 IP 403이라 우회 불가,
+  // 이 두 매체가 같은 사건군을 가장 빨리 다룬다. 둘 다 실측 200 확인.
+  { id: "bleeping", name: "BleepingComputer", rss: "https://www.bleepingcomputer.com/feed/", rank: 6 },
+  { id: "thn", name: "The Hacker News", rss: "https://feeds.feedburner.com/TheHackersNews", rank: 6 },
   // X (Twitter) via Nitter: DISABLED 2026-10-13 — both tested instances
   // (nitter.meowing.monster, nitter.kareem.one) serve 4-6 day old cached
   // posts, not real-time. Not usable for a real-time terminal.
