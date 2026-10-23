@@ -4,6 +4,10 @@ export type NewsSource = {
   rss: string;
   /** General-news wires. Only keep items whose TITLE looks like AI. */
   titleMustMatch?: boolean;
+  /** Security wires (34차). Only keep items whose TITLE carries an AI/LLM
+   * signal — blocks generic PHP/CVE noise while letting "LiteLLM"-class
+   * supply-chain stories through (the title contains "LLM"). */
+  secTitleHint?: boolean;
   /** Higher = preferred when picking the 6 new slots. */
   rank?: number;
 };
@@ -92,8 +96,8 @@ export const NEWS_SOURCES: NewsSource[] = [
   // 32차: 보안·공급망 전문매체 (31차 패널: LiteLLM·DaisyUI-MCP 같은 공급망
   // 악성코드 [중요]를 통째로 놓침). Reddit RSS는 서버 IP 403이라 우회 불가,
   // 이 두 매체가 같은 사건군을 가장 빨리 다룬다. 둘 다 실측 200 확인.
-  { id: "bleeping", name: "BleepingComputer", rss: "https://www.bleepingcomputer.com/feed/", rank: 6 },
-  { id: "thn", name: "The Hacker News", rss: "https://feeds.feedburner.com/TheHackersNews", rank: 6 },
+  { id: "bleeping", name: "BleepingComputer", rss: "https://www.bleepingcomputer.com/feed/", rank: 6, secTitleHint: true },
+  { id: "thn", name: "The Hacker News", rss: "https://feeds.feedburner.com/TheHackersNews", rank: 6, secTitleHint: true },
   // X (Twitter) via Nitter: DISABLED 2026-10-13 — both tested instances
   // (nitter.meowing.monster, nitter.kareem.one) serve 4-6 day old cached
   // posts, not real-time. Not usable for a real-time terminal.
