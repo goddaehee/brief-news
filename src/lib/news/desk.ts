@@ -104,7 +104,7 @@ export const DESK_SYSTEM = `당신은 한국 AI 실무자용 뉴스 터미널 br
 - note: 위 어디에도 해당하지 않는 일반 업계 동향.
 
 keep=false
-- 주식·공시·특징주, 유튜브 라운드업, AI 무관, 만찬·참석·동행·포토, 인사 단신.`;
+- 주식·공시·특징주, 유튜브 라운드업, AI 무관, 만찬·참석·동행·포토, 인사 단신, 연예·문화·문학 화제, 개인 회고·감상 인터뷰, 소액 정부 지원 단신.`;
 
 export function deskUser(entry: {
   title: string;
@@ -360,7 +360,7 @@ export function shouldDrop(title: string, summary: string): boolean {
 // (?![복피]) — "현실회복"/"현실회피" 같은 정상 단어 오탐 방지. 절단 아티팩트는
 // 뒤에 복/피가 올 수 없음 ("현실화"의 음절 탈락이므로).
 // 향후 발견되는 패턴은 여기에 누적.
-const TRUNCATED_HINT = /펌웨다|현실회(?![복피])|다다\.|요요\.|됨됨\.|니다다\./;
+const TRUNCATED_HINT = /펌웨다|현실회(?![복피])|다다\.|요요\.|됨됨\.|니다다\.|것\.다\./;
 
 function looksTruncated(s: string): boolean {
   return TRUNCATED_HINT.test(s ?? "");
@@ -377,7 +377,7 @@ const ENTITY_HINT = /&(quot|amp|apos|lt|gt|#\d+);/;
 // 27차: "노려는" 추가 — X 경로 기존 기사 처리용.
 // 29차: "대익" 추가 — Grok 발견: "보안 위협 대익 자동화" (대응 오기).
 // 단독 단어로 공백 사이에 있을 때만 — "김대익" 같은 인명 오교정 방지 (29차 크로스 리뷰 재현).
-const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)|노려는|시크릟|휴깅페이스|(?<=\s)대익(?=\s)/;
+const TYPO_HINT = /앤스로픽|클로드\(챗\)|챗\(클로드\)|노려는|시크릟|휴깅페이스|제약가(?=\s|$)|스노우플레이스|(?<=\s)대익(?=\s)/;
 
 export function needsRewrite(
   item: Pick<NewsItem, "title" | "takeaway" | "summary" | "grade" | "originalTitle">,
@@ -385,7 +385,9 @@ export function needsRewrite(
   if (shouldDrop(item.title, item.summary)) return true;
   if (hangulLen(item.title) > 46) return true;
   // 32차: 제목 하한 (31차 패널: 28자 미만 12건). 데스크 규격 28~44자.
-  if (hangulLen(item.title) < 27) return true;
+  // 34차: 33차 패널이 원문 길이(공백·기호 포함) 기준으로 재니 하한 미달이
+  // 25%였다 — hangulLen 27이면 원문 27자일 수 있어 임계를 28로 올린다.
+  if (hangulLen(item.title) < 28) return true;
   if (hangulLen(item.takeaway) > 95) return true;
   if (LEAD_HINT.test(item.takeaway) && hangulLen(item.takeaway) > 55) return true;
   if (/해라|하라/.test(item.takeaway)) return true;
@@ -458,6 +460,13 @@ const TYPO_FIX: [RegExp, string][] = [
   // 32차: 표기 통일 — "휴깅페이스" → "허깅페이스" (X 경로는 DISPLAY_NAME_MAP이,
   // RSS·재작성 경로는 여기가 담당).
   [/휴깅페이스/g, "허깅페이스"],
+  // 34차: 33차 패널 발견 — "제약가"(제약이), "스노우플레이스"(스노우플레이크),
+  // "칸바"(캔바, Canva 한국 표기). "칸바스"(캔버스)와 충돌 방지 lookahead.
+  // 34차: "제약가"는 공백·문장 끝 앞일 때만 (제약가격→제약이격 오교정 방지 —
+  // Codex 반례), "칸바"는 구분자 앞일 때만 (인명 등 고유명사 보호).
+  [/제약가(?=\s|$)/g, "제약이"],
+  [/스노우플레이스/g, "스노우플레이크"],
+  [/칸바(?=[\s,·ㆍ:])/g, "캔바"],
 ];
 
 function fixTypos(s: string): string {
