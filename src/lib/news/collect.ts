@@ -19,6 +19,7 @@ import {
   INGEST_MAX_BATCH,
   NEWS_SOURCES,
   SOURCE_RANK,
+  type NewsSource,
 } from "./sources";
 import { decodeFeedBytes, parseFeedXml, parseNewsMarkdown } from "./parse";
 import {
@@ -26,11 +27,13 @@ import {
   deleteItem,
   ensureSeeded,
   finishRun,
+  getFeedCache,
   insertItem,
   lastRunAt,
   listAllSourceUrls,
   listNews,
   releaseCollectLock,
+  setFeedCache,
   tryCollectLock,
   updateItem,
   upsertBriefing,
@@ -401,34 +404,79 @@ function rewriteNitterUrl(url: string): string {
   return url;
 }
 
-async function pullRss(stats?: CollectStats): Promise<RawEntry[]> {
-  const results = await Promise.all(
-    NEWS_SOURCES.map(async (src) => {
-      try {
-        const res = await fetch(src.rss, {
-          headers: {
-            "User-Agent": "brief-news-collector/1.0 (+https://brief.news)",
-            Accept: "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html",
-          },
-          signal: AbortSignal.timeout(8000),
-        });
-        if (!res.ok) return [] as RawEntry[];
-        const buf = new Uint8Array(await res.arrayBuffer());
-        const xml = decodeFeedBytes(buf, res.headers.get("content-type") ?? "");
-        return parseFeedXml(xml, src.name).map((e) => ({
-          title: e.title,
-          sourceUrl: src.id.startsWith("x-") ? rewriteNitterUrl(e.link) : e.link,
-          source: src.name,
-          date: e.date,
-          summary: e.summary,
-          titleMustMatch: Boolean(src.titleMustMatch),
-          secTitleHint: Boolean(src.secTitleHint),
-        }));
-      } catch {
-        return [] as RawEntry[];
+/** Phase 2: 소스 1개의 피드를 조건부 GET으로 가져와 파싱한다 (pullRss의 단위). */
+export async function fetchSourceEntries(src: NewsSource): Promise<RawEntry[]> {
+  try {
+    // 조건부 GET — 피드가 바뀌지 않았으면(304) 본문을 받지 않는다.
+    // 대형·저빈도 피드(METR 4.1MB 전문)의 매 수집 전량 수신 낭비 방지
+    // (Phase 2 패널 조건). 캐시 조회·저장 실패는 수집을 막지 않는다.
+    let cache: { etag?: string; lastModified?: string; updatedAt?: number; payload?: string } = {};
+    try {
+      cache = await getFeedCache(src.id);
+    } catch {
+      cache = {};
+    }
+    const headers: Record<string, string> = {
+      "User-Agent": "brief-news-collector/1.0 (+https://brief.news)",
+      Accept: "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html",
+    };
+    // TTL: 캐시가 6시간 이상 오래되면 조건부 헤더를 보내지 않고 전량 받는다.
+    // 서버가 ETag를 잘못 운용(내용이 바뀌어도 같은 값)하는 경우에도 최대
+    // 6시간마다 실본문으로 캐시를 되돌리는 안전장치다.
+    const FEED_CACHE_TTL_MS = 6 * 3600 * 1000;
+    const cacheFresh = cache.updatedAt != null && Date.now() - cache.updatedAt < FEED_CACHE_TTL_MS;
+    if (cacheFresh && cache.etag) headers["If-None-Match"] = cache.etag;
+    if (cacheFresh && cache.lastModified) headers["If-Modified-Since"] = cache.lastModified;
+    const res = await fetch(src.rss, {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.status === 304) {
+      // 변경 없음 — 마지막 200의 파싱 결과를 그대로 재반환한다. 빈 배열을
+      // 돌리면 캡·우선순위에 밀렸던 후보가 재평가 기회 없이 사라진다
+      // (Codex 리뷰 P1). 저장본이 없거나 깨졌으면 빈 배열.
+      if (cache.payload) {
+        try {
+          const stored = JSON.parse(cache.payload) as RawEntry[];
+          if (Array.isArray(stored)) return stored;
+        } catch {
+          /* 저장본 파싱 실패 — 빈 배열로 폴백 */
+        }
       }
-    }),
-  );
+      return [] as RawEntry[];
+    }
+    if (!res.ok) return [] as RawEntry[];
+    const buf = new Uint8Array(await res.arrayBuffer());
+    const xml = decodeFeedBytes(buf, res.headers.get("content-type") ?? "");
+    const parsed = parseFeedXml(xml, src.name).map((e) => ({
+      title: e.title,
+      sourceUrl: src.id.startsWith("x-") ? rewriteNitterUrl(e.link) : e.link,
+      source: src.name,
+      date: e.date,
+      summary: e.summary,
+      titleMustMatch: Boolean(src.titleMustMatch),
+      secTitleHint: Boolean(src.secTitleHint),
+    }));
+    // 검증자·파싱 결과 저장은 본문을 끝까지 읽고 파싱까지 성공한 뒤에만 한다.
+    // 먼저 저장하면 본문 전송 실패 시 캐시만 갱신돼 다음 304에서
+    // 피드를 영구히 놓친다 (Codex 리뷰 P1).
+    try {
+      await setFeedCache(src.id, {
+        etag: res.headers.get("etag") ?? undefined,
+        lastModified: res.headers.get("last-modified") ?? undefined,
+        payload: JSON.stringify(parsed),
+      });
+    } catch {
+      /* 캐시 저장 실패는 무시 — 다음 수집에서 다시 받는다 */
+    }
+    return parsed;
+  } catch {
+    return [] as RawEntry[];
+  }
+}
+
+async function pullRss(stats?: CollectStats): Promise<RawEntry[]> {
+  const results = await Promise.all(NEWS_SOURCES.map((src) => fetchSourceEntries(src)));
   const raw = results.flat();
   if (stats) stats.rawFetched += raw.length;
   const keptEntries = raw.filter((e) => {
