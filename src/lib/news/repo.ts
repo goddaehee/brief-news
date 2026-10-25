@@ -156,6 +156,7 @@ function mapRow(row: Record<string, unknown>): NewsItem {
   return {
     id: String(row.id),
     publishedAt: Number(published),
+    createdAt: row.created_ms == null ? undefined : Number(row.created_ms),
     grade: row.grade as Grade,
     tip: Boolean(row.tip),
     title: String(row.title),
@@ -265,6 +266,7 @@ export async function listNews(): Promise<NewsItem[]> {
     const sql = getSql();
     const rows = await sql(
       `select id, (extract(epoch from published_at) * 1000) as published_ms,
+              (extract(epoch from created_at) * 1000) as created_ms,
               grade, tip, title, takeaway, summary, source, source_url, original_title, topics
          from news_items order by published_at desc limit 200`,
     );
@@ -290,6 +292,32 @@ export async function listAllSourceUrls(): Promise<string[]> {
     return rows.map((row) => String(row.source_url));
   }
   return [...mem().urls];
+}
+
+/**
+ * Phase 2: 소스별 최근 삽입 건수 (sourceCap 판정용).
+ * listNews()는 발행일 상위 200건 창이라, 창 밖 백로그의 최근 삽입을
+ * 세지 못해 캡이 샌다 (Codex 리뷰 P2). 발행일 창과 무관하게
+ * created_at >= sinceMs 조건으로 DB에서 직접 집계한다.
+ * createdAt이 없는 항목(시드 등)은 발행일로 폴백한다.
+ */
+export async function countRecentInsertsBySource(sinceMs: number): Promise<Map<string, number>> {
+  await ensureSchema();
+  const counts = new Map<string, number>();
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    const rows = await sql(
+      `select source, count(*) as n from news_items where created_at >= $1 group by source`,
+      [new Date(sinceMs).toISOString()],
+    );
+    for (const row of rows) counts.set(String(row.source), Number(row.n));
+    return counts;
+  }
+  for (const item of mem().items.values()) {
+    const at = item.createdAt ?? item.publishedAt;
+    if (at >= sinceMs) counts.set(item.source, (counts.get(item.source) ?? 0) + 1);
+  }
+  return counts;
 }
 
 /**
@@ -407,6 +435,7 @@ export async function searchNews(
         : `order by published_at desc`;
     const rows = await sql(
       `select id, (extract(epoch from published_at) * 1000) as published_ms,
+              (extract(epoch from created_at) * 1000) as created_ms,
               grade, tip, title, takeaway, summary, source, source_url, original_title, topics
          from news_items ${where} ${orderBy} limit ${limit} offset ${offset}`,
       params,
@@ -431,6 +460,7 @@ export async function getNewsById(id: string): Promise<NewsItem | undefined> {
     const sql = getSql();
     const rows = await sql(
       `select id, (extract(epoch from published_at) * 1000) as published_ms,
+              (extract(epoch from created_at) * 1000) as created_ms,
               grade, tip, title, takeaway, summary, source, source_url, original_title, topics
          from news_items where id = $1`,
       [id],
@@ -485,6 +515,7 @@ export async function insertItem(payload: IngestPayload): Promise<boolean> {
   const item: NewsItem = {
     id,
     publishedAt,
+    createdAt: Date.now(),
     grade: payload.grade,
     tip: payload.tip,
     title: payload.title,
