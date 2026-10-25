@@ -41,6 +41,13 @@ create table if not exists collect_lock (
   locked_at timestamptz,
   owner text
 );
+create table if not exists feed_cache (
+  source_id text primary key,
+  etag text,
+  last_modified text,
+  payload text,
+  updated_at timestamptz not null default now()
+);
 insert into collect_lock (id) values (1) on conflict (id) do nothing
 `;
 
@@ -112,6 +119,7 @@ type Mem = {
   runSeq: number;
   lockUntil: number;
   lockOwner: string | null;
+  feedCache: Map<string, FeedCache>;
 };
 
 function mem(): Mem {
@@ -125,6 +133,7 @@ function mem(): Mem {
       runSeq: 1,
       lockUntil: 0,
       lockOwner: null,
+      feedCache: new Map(),
     };
   }
   return g.__briefMem__;
@@ -281,6 +290,67 @@ export async function listAllSourceUrls(): Promise<string[]> {
     return rows.map((row) => String(row.source_url));
   }
   return [...mem().urls];
+}
+
+/**
+ * Phase 2: 피드 조건부 GET(ETag / Last-Modified) 캐시.
+ * METR(4.1MB 전문 피드)처럼 크고 저빈도인 피드를 매 수집마다 전량 받는
+ * 낭비를 줄인다 (Phase 2 패널 조건). 캐시는 최적화일 뿐이라, 호출부는
+ * 조회·저장 실패를 무시하고 수집을 계속할 수 있게 설계한다.
+ */
+export type FeedCache = {
+  etag?: string;
+  lastModified?: string;
+  updatedAt?: number;
+  /** 마지막 200 응답의 파싱 결과(JSON 문자열). 304일 때 그대로 재반환해
+   * 캡에 밀린 후보가 다음 수집에서도 재평가되게 한다 (Codex 리뷰 P1).
+   * 직렬화·역직렬화는 호출부(collect)가 담당한다. */
+  payload?: string;
+};
+
+export async function getFeedCache(sourceId: string): Promise<FeedCache> {
+  await ensureSchema();
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    const rows = await sql(
+      `select etag, last_modified, payload, (extract(epoch from updated_at) * 1000) as updated_ms
+         from feed_cache where source_id = $1`,
+      [sourceId],
+    );
+    if (!rows[0]) return {};
+    return {
+      etag: rows[0].etag == null ? undefined : String(rows[0].etag),
+      lastModified: rows[0].last_modified == null ? undefined : String(rows[0].last_modified),
+      updatedAt: rows[0].updated_ms == null ? undefined : Number(rows[0].updated_ms),
+      payload: rows[0].payload == null ? undefined : String(rows[0].payload),
+    };
+  }
+  return mem().feedCache.get(sourceId) ?? {};
+}
+
+export async function setFeedCache(sourceId: string, cache: FeedCache): Promise<void> {
+  await ensureSchema();
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    await sql(
+      `insert into feed_cache (source_id, etag, last_modified, payload, updated_at)
+       values ($1, $2, $3, $4, now())
+       on conflict (source_id) do update
+         set etag = excluded.etag, last_modified = excluded.last_modified,
+             payload = coalesce(excluded.payload, feed_cache.payload), updated_at = now()`,
+      [sourceId, cache.etag ?? null, cache.lastModified ?? null, cache.payload ?? null],
+    );
+    return;
+  }
+  // 메모리 경로: updatedAt은 호출부가 준 값을 존중한다 (TTL 테스트용).
+  // DB 경로는 now()로 고정되며 updatedAt 파라미터를 쓰지 않는다.
+  // payload를 넘기지 않으면 기존 저장본을 유지한다 (DB coalesce와 동일 의미).
+  const prev = mem().feedCache.get(sourceId);
+  mem().feedCache.set(sourceId, {
+    ...cache,
+    payload: cache.payload ?? prev?.payload,
+    updatedAt: cache.updatedAt ?? Date.now(),
+  });
 }
 
 export type SearchSort = "new" | "relevant";
