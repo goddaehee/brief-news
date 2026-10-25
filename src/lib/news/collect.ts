@@ -24,6 +24,7 @@ import {
 import { decodeFeedBytes, parseFeedXml, parseNewsMarkdown } from "./parse";
 import {
   beginRun,
+  countRecentInsertsBySource,
   deleteItem,
   ensureSeeded,
   finishRun,
@@ -184,11 +185,15 @@ export async function collectOnce(): Promise<CollectResult> {
       const existingUrls = new Set(allSourceUrls);
       const existingItems = existing.filter((i) => !isSeedItem(i));
       // 소스별 하드캡: 단일 소스 최대 6건 (풍선 효과 방지 — ZDNet 잡으니 인공지능신문이 올라옴)
+      // Phase 2: 점유 계산을 '최근 24시간 삽입분'으로 바꾼다. 기존의 200건 창
+      // 기준은 삽입이 멈추면 창이 화석화돼(9개 소스가 정확히 6건에서 동결)
+      // 해당 소스의 신선 기사가 영구 차단되는 교착을 만들었다 (실측:
+      // 창 최신 글이 23시간+ 정지, dropSourceCap이 배치 최대 탈락으로 고정).
+      // 집계는 발행일 창과 무관하게 created_at으로 DB에서 직접 한다 —
+      // 창 밖 백로그의 최근 삽입까지 세야 캡 보장이 새지 않는다 (Codex P2).
+      // 풍선 방지 취지(최근 피드에서 단일 소스 점유 제한)는 24시간 기준으로 유지된다.
       const SOURCE_CAP = 6;
-      const sourceCounts = new Map<string, number>();
-      for (const item of existingItems) {
-        sourceCounts.set(item.source, (sourceCounts.get(item.source) ?? 0) + 1);
-      }
+      const sourceCounts = await countRecentInsertsBySource(Date.now() - 24 * 3600 * 1000);
       // P0-2: 컷오프는 분류 뒤로 이동. 후보를 넉넉히(최대 24건·소스당 최대 3건) 수집 → 전원 분류 → keep=true 중 상위 newCap건만 편입
       const BATCH_MAX = 24;
       const BATCH_SOURCE_CAP = 3;
