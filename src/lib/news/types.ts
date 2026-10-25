@@ -8,6 +8,8 @@ export type Topic = {
 export type NewsItem = {
   id: string;
   publishedAt: number;
+  /** DB 삽입 시각 (epoch ms). 소스별 캡의 최근 점유 계산용 (Phase 2). */
+  createdAt?: number;
   grade: Grade;
   tip: boolean;
   title: string;
