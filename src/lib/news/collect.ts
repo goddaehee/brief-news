@@ -23,7 +23,29 @@ import {
   updateItem,
   upsertBriefing,
 } from "./repo";
-import type { CollectResult, IngestPayload, NewsItem } from "./types";
+import type { CollectResult, CollectStats, IngestPayload, NewsItem } from "./types";
+
+/** Phase 0 계측 카운터 초기화 (전 필드 0). */
+export function newCollectStats(): CollectStats {
+  return {
+    rawFetched: 0,
+    dropSkipHint: 0,
+    dropVendorStory: 0,
+    dropSecHint: 0,
+    dropNoAiSignal: 0,
+    dropUrlDup: 0,
+    kept: 0,
+    dropAlreadyInDb: 0,
+    dropSourceCap: 0,
+    dropBatchSourceCap: 0,
+    dropSimilar: 0,
+    dropBatchMax: 0,
+    batch: 0,
+    dropKeepFalse: 0,
+    dropNewCap: 0,
+    dropInsertFail: 0,
+  };
+}
 
 const AI_HINT =
   /\b(ai|a\.i\.|llm|gpt-?\d*|chatgpt|claude|gemini|grok|openai|anthropic|xai|nvidia|hbm|gpu|agent|인공지능|생성형|챗봇|딥러닝|에이전트|언어\s*모델|파운데이션\s*모델)\b/i;
@@ -114,6 +136,10 @@ export async function collectOnce(): Promise<CollectResult> {
     const runId = await beginRun();
     // 34차: 제목 재시도 예산은 run 지역 객체로 (전역 변수 초기화 경합 방지 — Codex 재심)
     const retryBudget: RetryBudget = { left: 12 };
+    // Phase 0 계측: 단계별 탈락 카운터 (동작 변경 없는 순수 계측)
+    const stats = newCollectStats();
+    // 오류 시 부분 집계가 어느 단계에서 끊겼는지 표시하기 위한 진행 단계
+    let statsStage = "pull";
     let fetched = 0;
     let inserted = 0;
     let skipped = 0;
@@ -123,8 +149,9 @@ export async function collectOnce(): Promise<CollectResult> {
       // rewriteStale과 pullRss는 독립적이므로 병렬 실행 (Vercel 60초 제한 대응)
       const [rewritten, entries] = await Promise.all([
         rewriteStale(existing, retryBudget),
-        pullRss(),
+        pullRss(stats),
       ]);
+      statsStage = "dedupe";
       // rewriteStale이 삭제/업데이트했을 수 있으므로 최신 피드로 다시 조회 후 중복 정리 (P2)
       const deduped = await dedupeExisting(await listNews());
       fetched = entries.length;
@@ -142,22 +169,28 @@ export async function collectOnce(): Promise<CollectResult> {
       // P0-2: 컷오프는 분류 뒤로 이동. 후보를 넉넉히(최대 24건·소스당 최대 3건) 수집 → 전원 분류 → keep=true 중 상위 newCap건만 편입
       const BATCH_MAX = 24;
       const BATCH_SOURCE_CAP = 3;
+      statsStage = "batch";
       const batchSourceCounts = new Map<string, number>();
+      let batchProcessed = 0;
       for (const e of entries) {
+        batchProcessed += 1;
         if (existingUrls.has(e.sourceUrl)) {
           skipped += 1;
+          stats.dropAlreadyInDb += 1;
           continue;
         }
         // 소스별 캡 체크: 이미 6건 이상인 소스는 스킵
         const sourceCount = sourceCounts.get(e.source) ?? 0;
         if (sourceCount >= SOURCE_CAP) {
           skipped += 1;
+          stats.dropSourceCap += 1;
           continue;
         }
         // 배치 내 소스당 최대 3건 — 고순위 소스(AI타임스 등)의 슬롯 독점 방지
         const batchCount = batchSourceCounts.get(e.source) ?? 0;
         if (batchCount >= BATCH_SOURCE_CAP) {
           skipped += 1;
+          stats.dropBatchSourceCap += 1;
           continue;
         }
         if (
@@ -169,6 +202,7 @@ export async function collectOnce(): Promise<CollectResult> {
           fresh.some((f) => tooSimilar(f.title, e.title, f.date, e.date))
         ) {
           skipped += 1;
+          stats.dropSimilar += 1;
           continue;
         }
         fresh.push(e);
@@ -177,6 +211,9 @@ export async function collectOnce(): Promise<CollectResult> {
         batchSourceCounts.set(e.source, batchCount + 1);
         if (fresh.length >= BATCH_MAX) break;
       }
+      // BATCH_MAX로 루프를 조기 종료한 경우, 검토조차 못한 후순위 건수
+      stats.dropBatchMax = entries.length - batchProcessed;
+      stats.batch = fresh.length;
 
       // P0-1: summary가 빈 fresh 후보는 기사 본문 첫 ~500자를 발췌해 보강 (제목만 보고 keep=false 탈락 방지)
       await Promise.all(
@@ -187,22 +224,30 @@ export async function collectOnce(): Promise<CollectResult> {
         }),
       );
 
+      statsStage = "classify";
       const classified = await Promise.all(fresh.map((entry) => classifyEntry(entry, retryBudget)));
+      statsStage = "insert";
       for (const payload of classified) {
         if (payload.keep === false) {
           skipped += 1;
+          stats.dropKeepFalse += 1;
           continue;
         }
         // P0-2: 분류 뒤 컷오프 — keep=true 중 상위 newCap건만 편입 (entries는 byDeskPriority 정렬 순서 유지)
         if (inserted >= newCap) {
           skipped += 1;
+          stats.dropNewCap += 1;
           continue;
         }
         const ok = await insertItem(payload);
         if (ok) inserted += 1;
-        else skipped += 1;
+        else {
+          skipped += 1;
+          stats.dropInsertFail += 1;
+        }
       }
 
+      statsStage = "finalize";
       if (inserted > 0 || rewritten > 0 || deduped > 0) await refreshBriefing();
 
       const note =
@@ -212,6 +257,8 @@ export async function collectOnce(): Promise<CollectResult> {
             ? "RSS를 가져오지 못했습니다. 네트워크 또는 피드 주소를 확인하세요."
             : "새 소식이 없거나 모두 중복입니다.";
 
+      // Phase 0 계측: 단계별 카운터를 구조화 로그로 남긴다 (Vercel 함수 로그).
+      console.log(`[collect-stats] ${JSON.stringify(stats)}`);
       await finishRun(runId, {
         status: "ok",
         fetched,
@@ -227,9 +274,14 @@ export async function collectOnce(): Promise<CollectResult> {
         skipped,
         note,
         lastRunAt: Date.now(),
+        stats,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : "collect failed";
+      // 부분 집계 스냅샷: Promise.all의 다른 작업이 stats를 계속 바꿀 수 있어
+      // 로그와 응답이 같은 복사본을 보도록 고정한다 (Codex 리뷰 반영).
+      const statsSnapshot: CollectStats = { ...stats, partial: true, failedStage: statsStage };
+      console.log(`[collect-stats] ${JSON.stringify(statsSnapshot)}`);
       await finishRun(runId, {
         status: "error",
         fetched,
@@ -245,6 +297,7 @@ export async function collectOnce(): Promise<CollectResult> {
         skipped,
         note: message,
         lastRunAt: Date.now(),
+        stats: statsSnapshot,
       };
     }
   } finally {
@@ -293,12 +346,19 @@ async function fetchArticleLede(url: string): Promise<string> {
 export const SEC_TITLE_HINT =
   /\b(ai|llm|gpt|mcp)\b|agentic|ai agent|machine learning|claude|gemini|openai|anthropic|chatgpt|litellm|ollama|langchain|hugging|deepseek|copilot|에이전트|인공지능|챗봇|딥러닝|머신러닝|생성형/i;
 
-function keepEntry(e: RawEntry): boolean {
-  if (SKIP_HINT.test(e.title) || SKIP_HINT.test(e.summary)) return false;
-  if (isVendorCustomerStory(e)) return false;
-  if (e.secTitleHint && !SEC_TITLE_HINT.test(e.title)) return false;
+/** Phase 0 계측: keepEntry 탈락 사유. null이면 keep 통과. 판정 로직은 기존 keepEntry와 동일. */
+export type KeepDropReason = "skipHint" | "vendorStory" | "secHint" | "noAiSignal";
+
+export function keepDropReason(e: RawEntry): KeepDropReason | null {
+  if (SKIP_HINT.test(e.title) || SKIP_HINT.test(e.summary)) return "skipHint";
+  if (isVendorCustomerStory(e)) return "vendorStory";
+  if (e.secTitleHint && !SEC_TITLE_HINT.test(e.title)) return "secHint";
   const target = e.titleMustMatch ? e.title : `${e.title} ${e.summary}`;
-  return AI_HINT.test(target);
+  return AI_HINT.test(target) ? null : "noAiSignal";
+}
+
+function keepEntry(e: RawEntry): boolean {
+  return keepDropReason(e) === null;
 }
 
 /** Nitter status URLs -> canonical x.com URLs (Nitter instances are flaky). */
@@ -308,7 +368,7 @@ function rewriteNitterUrl(url: string): string {
   return url;
 }
 
-async function pullRss(): Promise<RawEntry[]> {
+async function pullRss(stats?: CollectStats): Promise<RawEntry[]> {
   const results = await Promise.all(
     NEWS_SOURCES.map(async (src) => {
       try {
@@ -336,11 +396,28 @@ async function pullRss(): Promise<RawEntry[]> {
       }
     }),
   );
-  return results
-    .flat()
-    .filter(keepEntry)
-    .sort(byDeskPriority)
-    .filter((e, i, arr) => arr.findIndex((x) => x.sourceUrl === e.sourceUrl) === i);
+  const raw = results.flat();
+  if (stats) stats.rawFetched += raw.length;
+  const keptEntries = raw.filter((e) => {
+    const reason = keepDropReason(e);
+    if (!reason) return true;
+    if (stats) {
+      if (reason === "skipHint") stats.dropSkipHint += 1;
+      else if (reason === "vendorStory") stats.dropVendorStory += 1;
+      else if (reason === "secHint") stats.dropSecHint += 1;
+      else stats.dropNoAiSignal += 1;
+    }
+    return false;
+  });
+  const sorted = keptEntries.sort(byDeskPriority);
+  const deduped = sorted.filter(
+    (e, i, arr) => arr.findIndex((x) => x.sourceUrl === e.sourceUrl) === i,
+  );
+  if (stats) {
+    stats.dropUrlDup += sorted.length - deduped.length;
+    stats.kept += deduped.length;
+  }
+  return deduped;
 }
 
 function hasHangul(s: string): boolean {
