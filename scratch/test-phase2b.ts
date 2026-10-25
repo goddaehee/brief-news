@@ -125,6 +125,33 @@ async function main() {
     broken.close();
   }
 
+  // ---------- (f) countRecentInsertsBySource: 창 밖 백로그도 집계 (Codex P2) ----------
+  const now = Date.now();
+  const H = 3600 * 1000;
+  const mkPayload = (source: string, publishedAt: number, n: number) => ({
+    title: `cap-test ${source} ${n}`,
+    takeaway: "cap test. 확인 필요.",
+    summary: "cap test",
+    source,
+    sourceUrl: `https://example.com/cap/${source}/${n}`,
+    originalTitle: `cap-test ${source} ${n}`,
+    grade: "note" as const,
+    tip: false,
+    topics: [],
+    publishedAt,
+  });
+  // 최신 발행 필러 210건으로 200건 창을 채우고, 발행일이 40일 전인 CapA 5건을
+  // '최근 삽입'한다 — listNews 창에는 CapA가 없지만 집계에는 잡혀야 한다.
+  for (let i = 0; i < 210; i++) await repo.insertItem(mkPayload("Filler", now - i * 1000, i));
+  for (let i = 0; i < 5; i++) await repo.insertItem(mkPayload("CapA", now - 40 * 24 * H, i));
+  const window = await repo.listNews();
+  check("창(200건)에 CapA는 없음 (전부 필러)", window.some((i) => i.source === "CapA"), false);
+  const recent = await repo.countRecentInsertsBySource(now - 24 * H);
+  check("창 밖 백로그 CapA도 최근 삽입으로 집계", recent.get("CapA"), 5);
+  check("필러 210건 집계", recent.get("Filler"), 210);
+  const future = await repo.countRecentInsertsBySource(now + H);
+  check("cutoff를 미래로 두면 0건", future.get("CapA"), undefined);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 }
