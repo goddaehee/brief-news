@@ -1,6 +1,17 @@
 import { isSeedItem } from "./data";
 import { chatJson, resolveLlm } from "./llm";
-import { deskUser, DESK_SYSTEM, fixTypos, needsRewrite, polishPayload, shouldDrop } from "./desk";
+import {
+  buildPayloadFromCard,
+  FACT_SYSTEM,
+  factUser,
+  fixTypos,
+  needsRewrite,
+  parseFactCard,
+  shouldDrop,
+  verifyAgainstCard,
+  WRITE_SYSTEM,
+  writeUser,
+} from "./desk";
 import {
   COLLECT_COOLDOWN_MS,
   COLLECT_MAX_NEW,
@@ -23,7 +34,7 @@ import {
   updateItem,
   upsertBriefing,
 } from "./repo";
-import type { CollectResult, CollectStats, IngestPayload, NewsItem } from "./types";
+import type { CollectResult, CollectStats, FactCard, IngestPayload, NewsItem } from "./types";
 
 /** Phase 0 계측 카운터 초기화 (전 필드 0). */
 export function newCollectStats(): CollectStats {
@@ -226,6 +237,19 @@ export async function collectOnce(): Promise<CollectResult> {
 
       statsStage = "classify";
       const classified = await Promise.all(fresh.map((entry) => classifyEntry(entry, retryBudget)));
+      // Phase 1: 등급 거버너 — 편입 대상에 최근 40건 비율 12~18% 적용.
+      // 비율 이탈은 govSignal로만 남긴다 (자동 강등은 상한 초과 일반 승격분 한정).
+      const gov = applyGovernor(classified, existingItems, newCap);
+      stats.govDemoted = gov.demoted;
+      stats.govShareAfter = gov.shareAfter;
+      if (gov.signal) stats.govSignal = gov.signal;
+      if (gov.demoted > 0 || gov.signal) {
+        console.log(
+          `[desk-governor] demoted=${gov.demoted} shareAfter=${gov.shareAfter.toFixed(3)}${gov.signal ? ` signal=${gov.signal}` : ""}`,
+        );
+      }
+      const heldCount = classified.filter((p) => p.held).length;
+      if (heldCount > 0) stats.deskHeld = heldCount;
       statsStage = "insert";
       for (const payload of classified) {
         if (payload.keep === false) {
@@ -835,44 +859,172 @@ async function dedupeExisting(existing: NewsItem[]): Promise<number> {
 // 전역 변수가 아니라 진입 함수가 만든 지역 객체를 호출 경로로 전달한다.
 type RetryBudget = { left: number };
 
+// ============================================================================
+// Phase 1: 등급 거버너 (plan-final.md Phase 1)
+// 최근 40건 창 기준 [중요]급(속보 포함) 비율 12~18%를 지킨다.
+// - 하드 게이트 적중 건과 보안 힌트(SEC_TITLE_HINT) 통과 건은 상한 밖 (면제).
+// - 나머지는 Pass 1 중요도 점수 순위 + 거버너 슬롯으로 승격 여부를 정한다.
+//   절대 하한(점수 미달 승격 금지)은 decideGrade가 이미 적용한 상태다.
+// - 비율 이탈은 자동 강등이 아니라 stats.govSignal + 로그로 남기는 검토 신호다.
+//   단, 상한을 넘는 "일반 승격분"만 [참고]로 내린다 (면제분은 건드리지 않음).
+// ============================================================================
+
+export type GovernorResult = { demoted: number; shareAfter: number; signal?: string };
+
+const GOVERNOR_BAND_MIN = 0.12;
+const GOVERNOR_BAND_MAX = 0.18;
+const GOVERNOR_WINDOW = 40;
+
+function isTopGrade(p: Pick<IngestPayload, "grade">): boolean {
+  return p.grade === "important" || p.grade === "breaking";
+}
+
+export function applyGovernor(
+  payloads: IngestPayload[],
+  recent: NewsItem[],
+  newCap: number,
+): GovernorResult {
+  // 삽입 루프와 동일 순서로 실제 편입될 건만 대상 (keep=true 상위 newCap건)
+  const willInsert: IngestPayload[] = [];
+  for (const p of payloads) {
+    if (p.keep === false) continue;
+    if (willInsert.length >= newCap) break;
+    willInsert.push(p);
+  }
+  // 최종 창 시뮬레이션: 기존 + 신규를 publishedAt 순으로 합쳐 최근 40건만 남긴다.
+  // 신규가 밀어내는 오래된 기사까지 반영해야 비율이 실제 피드와 일치한다
+  // (Codex 리뷰 P1 — 46건으로 나눈 근사 금지).
+  type WinEntry = { top: boolean; publishedAt: number; payload?: IngestPayload; exempt: boolean };
+  const win: WinEntry[] = [
+    ...recent.map((i) => ({ top: isTopGrade(i), publishedAt: i.publishedAt, exempt: true })),
+    ...willInsert.map((p) => ({
+      top: isTopGrade(p),
+      publishedAt: p.publishedAt ?? 0,
+      payload: p,
+      exempt: p.hardGate != null || p.secHint === true,
+    })),
+  ]
+    .sort((a, b) => b.publishedAt - a.publishedAt)
+    .slice(0, GOVERNOR_WINDOW);
+  const total = win.length;
+  if (total === 0) return { demoted: 0, shareAfter: 0 };
+  let topCount = win.filter((w) => w.top).length;
+  const maxTop = Math.floor(GOVERNOR_BAND_MAX * total);
+  // 강등은 점수 낮은 후보부터 — 면제분과 기존 기사는 건드리지 않는다.
+  const candidates = win
+    .filter((w) => w.payload && !w.exempt && w.top)
+    .sort((a, b) => (a.payload!.score ?? 0) - (b.payload!.score ?? 0));
+  let demoted = 0;
+  for (const c of candidates) {
+    if (topCount <= maxTop) break;
+    c.payload!.grade = "note";
+    topCount -= 1;
+    demoted += 1;
+  }
+  const shareAfter = topCount / total;
+  let signal: string | undefined;
+  if (shareAfter > GOVERNOR_BAND_MAX) {
+    signal = `비율 ${(shareAfter * 100).toFixed(1)}% — 하드 게이트·보안 면제로 상한 18% 초과 (자동 강등 안 함, 검토 신호)`;
+  } else if (shareAfter < GOVERNOR_BAND_MIN) {
+    signal = `비율 ${(shareAfter * 100).toFixed(1)}% — 하한 12% 미달 (승격 후보 부족, 검토 신호)`;
+  }
+  return { demoted, shareAfter, signal };
+}
+
+/** Phase 1 Pass 2 호출 — 사실 카드 기반 작성. feedback이 있으면 재작성 지시 포함. */
+async function writeFromCard(
+  entry: RawEntry,
+  card: FactCard,
+  feedback: { prevTitle: string; problems: string[] } | null,
+): Promise<Record<string, unknown> | null> {
+  return chatJson({ system: WRITE_SYSTEM, user: writeUser(entry, card, feedback) });
+}
+
 async function classifyEntry(entry: RawEntry, budget?: RetryBudget): Promise<IngestPayload> {
   if (shouldDrop(entry.title, entry.summary)) {
     return { ...fallbackPayload(entry), keep: false };
   }
   if (!resolveLlm()) return fallbackPayload(entry);
 
-  const json = await chatJson({
-    system: DESK_SYSTEM,
-    user: deskUser(entry),
-  });
-
-  if (!json) return fallbackPayload(entry);
-  if (json.keep === false) {
+  // ---- Pass 1: 사실 카드 + 중요도 점수 + 승격 근거 (등급·제목·시사점 미확정) ----
+  const factJson = await chatJson({ system: FACT_SYSTEM, user: factUser(entry) });
+  if (!factJson) return fallbackPayload(entry);
+  if (factJson.keep === false) {
     return { ...fallbackPayload(entry), keep: false };
   }
-  const payload = polishPayload(json, entry);
+  const card = parseFactCard(factJson);
+  if (!card) return fallbackPayload(entry);
+
+  // ---- Pass 2: 사실 카드 기반으로만 제목·시사점 작성 ----
+  const write = await writeFromCard(entry, card, null);
+  if (!write) return fallbackPayload(entry);
+  let usedNames: unknown = write.usedNames;
+  let payload = buildPayloadFromCard(card, write, entry);
+  payload.secHint = Boolean(entry.secTitleHint);
   if (shouldDrop(payload.title, payload.summary)) {
     return { ...payload, keep: false };
   }
-  // 34차: 제목 하한 재시도 — 33차 패널: 28자 미만 25%. 생성 모델이 짧게 쓰는
-  // 경향이 있어, 하한 미달이면 결함을 명시해 1회만 다시 분류한다.
-  // Codex 재심 반영: 채택 조건은 "더 길다"가 아니라 하한 충족(코드포인트
-  // 28자 이상)일 때만. run당 재시도 총량 상한으로 호출 예산도 통제한다.
-  if ([...payload.title].length < 28 && budget && budget.left > 0) {
+
+  // ---- 원문 대조 검증 + 재작성 (34차 제목 하한 재시도와 통합, run당 예산 공유) ----
+  let violations = verifyAgainstCard(payload.title, payload.takeaway, payload.summary, card, entry, usedNames);
+  const titleShort = [...payload.title].length < 28;
+  if ((violations.length > 0 || titleShort) && budget && budget.left > 0) {
     budget.left -= 1;
-    const retryJson = await chatJson({
-      system: DESK_SYSTEM,
-      user: `${deskUser(entry)}\n\n[재작성 지시] 직전 제목 "${payload.title}"은(는) ${[...payload.title].length}자로 28자 하한에 못 미친다. 같은 사실을 유지하되 주어·대상·수치·범위 같은 구체 맥락을 원문에서 보강해 제목을 28~44자로 다시 쓰고, 시사점과 요약도 함께 다시 출력하라.`,
-    });
-    if (retryJson && retryJson.keep !== false) {
-      const retryPayload = polishPayload(retryJson, entry);
+    const problems = violations.map((v) => v.detail);
+    if (titleShort) {
+      problems.push(
+        `제목이 ${[...payload.title].length}자로 28자 하한에 못 미친다. 같은 사실을 유지하되 주어·대상·수치·범위 같은 구체 맥락을 원문에서 보강해 28~44자로 다시 쓸 것.`,
+      );
+    }
+    const retryWrite = await writeFromCard(entry, card, { prevTitle: payload.title, problems });
+    if (retryWrite) {
+      const retryPayload = buildPayloadFromCard(card, retryWrite, entry);
+      retryPayload.secHint = Boolean(entry.secTitleHint);
+      // 재시도 채택 조건 (Codex 리뷰 P2 + 3차): 28자 하한을 채웠거나,
+      // 원래도 하한 이상이었는데 줄지 않았을 때만 채택한다. 하한 미달인
+      // 원본(20자)을 25자로 "개선"하는 채택은 구 34차 규칙 위반이라 금지.
+      const prevLen = [...payload.title].length;
+      const newLen = [...retryPayload.title].length;
       if (
-        [...retryPayload.title].length >= 28 &&
-        !shouldDrop(retryPayload.title, retryPayload.summary)
+        !shouldDrop(retryPayload.title, retryPayload.summary) &&
+        (newLen >= 28 || (prevLen >= 28 && newLen >= prevLen))
       ) {
-        return retryPayload;
+        payload = retryPayload;
+        usedNames = retryWrite.usedNames;
+        violations = verifyAgainstCard(payload.title, payload.takeaway, payload.summary, card, entry, usedNames);
       }
     }
+  }
+  // 재시도 후에도 남은 위반 처리:
+  // - entity: 라틴 표기 폴백 — 원문 제목으로 되돌린다 (원문 표기는 잠금을 통과).
+  // - number/status: 보류 — 삽입하지 않으면 다음 수집에서 다시 분류된다.
+  // - form(usedNames 선언 형식)만 남으면 내용은 수용하고 로그만 남긴다.
+  if (violations.some((v) => v.kind === "entity")) {
+    payload = buildPayloadFromCard(
+      card,
+      { title: entry.title, takeaway: payload.takeaway, summary: payload.summary },
+      entry,
+    );
+    payload.secHint = Boolean(entry.secTitleHint);
+    // 폴백 제목은 원문 표기 그 자체라 usedNames 추적은 생략 (근접 오형은 원문 면제)
+    violations = verifyAgainstCard(payload.title, payload.takeaway, payload.summary, card, entry);
+  }
+  // 폴백 후에도 남은 entity 위반(요약의 오형 등)도 보류한다 — 제목만 갈고
+  // 요약을 그대로 수용하면 잠금이 무력화된다 (Codex 리뷰 2차 P2).
+  const hardLeft = violations.filter(
+    (v) => v.kind === "number" || v.kind === "status" || v.kind === "entity",
+  );
+  if (hardLeft.length > 0) {
+    console.log(
+      `[desk-hold] 보류 "${entry.title.slice(0, 50)}" — ${hardLeft.map((v) => v.detail).join(" / ")}`,
+    );
+    return { ...payload, keep: false, held: true };
+  }
+  const formLeft = violations.filter((v) => v.kind === "form");
+  if (formLeft.length > 0) {
+    console.log(
+      `[desk-guard] usedNames 형식 위반 수용 "${entry.title.slice(0, 50)}" — ${formLeft.map((v) => v.detail).join(" / ")}`,
+    );
   }
   return payload;
 }
