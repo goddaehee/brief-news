@@ -28,6 +28,7 @@ import {
   finishRun,
   insertItem,
   lastRunAt,
+  listAllSourceUrls,
   listNews,
   releaseCollectLock,
   tryCollectLock,
@@ -157,6 +158,13 @@ export async function collectOnce(): Promise<CollectResult> {
 
     try {
       const existing = await listNews();
+      // Phase 2: 중복 판정용 전체 URL은 200건 창(listNews)이 아니라
+      // source_url 전체 조회로 구축한다 — 창 밖 중복이 분류(LLM)까지 간 뒤
+      // 삽입 시점에 소실(dropInsertFail)되는 것을 막는다.
+      // 조회 시점은 락·쿨다운 통과 직후·배치 루프 전. 이후 rewriteStale이
+      // 병렬로 항목을 삭제하더라도 그 URL은 이번 run에서 보수적으로
+      // '기존'으로 남는다 (허용 — 다음 run에서 재분류된다).
+      const allSourceUrls = await listAllSourceUrls();
       // rewriteStale과 pullRss는 독립적이므로 병렬 실행 (Vercel 60초 제한 대응)
       const [rewritten, entries] = await Promise.all([
         rewriteStale(existing, retryBudget),
@@ -168,8 +176,9 @@ export async function collectOnce(): Promise<CollectResult> {
       fetched = entries.length;
       const fresh: RawEntry[] = [];
       const newCap = rewritten > 0 ? Math.min(5, COLLECT_MAX_NEW) : COLLECT_MAX_NEW;
-      // DB 쿼리 대신 메모리의 existing Set으로 중복 체크 (순차 DB 왕복 제거)
-      const existingUrls = new Set(existing.filter((i) => !isSeedItem(i)).map((i) => i.sourceUrl));
+      // 중복 체크는 전체 URL Set으로 (순차 DB 왕복 제거). existingItems(200건 창)는
+      // 유사도 검사·sourceCounts·거버너 용도로만 현행 유지한다.
+      const existingUrls = new Set(allSourceUrls);
       const existingItems = existing.filter((i) => !isSeedItem(i));
       // 소스별 하드캡: 단일 소스 최대 6건 (풍선 효과 방지 — ZDNet 잡으니 인공지능신문이 올라옴)
       const SOURCE_CAP = 6;
@@ -1131,9 +1140,11 @@ export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted
   const retryBudget: RetryBudget = { left: 12 };
   await ensureSeeded();
   // P0: RSS 수집 경로와 동일한 중복 검사. X 보충 수집이 볼륨을 키우기 전 구멍 봉쇄.
-  // (X 배치는 건수가 적어 전체 조회 부담이 작다)
+  // Phase 2: existingUrls는 collectOnce와 동일하게 source_url 전체 조회로 구축한다
+  // (컬럼 1개만 조회하므로 부담이 작다). existingItems(200건 창)는
+  // 유사도 검사용으로 현행 유지.
   const existingItems = (await listNews()).filter((i) => !isSeedItem(i));
-  const existingUrls = new Set(existingItems.map((i) => i.sourceUrl));
+  const existingUrls = new Set(await listAllSourceUrls());
   const batch: IngestPayload[] = [];
   let inserted = 0;
   let skipped = 0;
