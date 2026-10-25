@@ -261,7 +261,26 @@ export async function listNews(): Promise<NewsItem[]> {
     );
     return rows.map(mapRow);
   }
-  return [...mem().items.values()].sort((a, b) => b.publishedAt - a.publishedAt);
+  // 메모리 경로도 DB 경로의 limit 200과 동일하게 맞춘다 (200건 창 용도).
+  return [...mem().items.values()].sort((a, b) => b.publishedAt - a.publishedAt).slice(0, 200);
+}
+
+/**
+ * 중복 판정 전용 전체 source_url 조회.
+ * listNews()(최신 200건 창)와 용도를 분리한다: 피드 표시·유사도·소스캡·
+ * 거버너는 200건 창으로 충분하지만, 중복 판정은 창 밖의 URL까지 알아야
+ * 분류(LLM)까지 거친 뒤 삽입 시점에 소실되는 일이 없다.
+ * DB 경로는 컬럼 1개만 조회한다 — news_items_source_url_uidx (unique index)가
+ * 있어 index-only scan이 가능하다. 순서는 무관하다 (Set 구축 전용).
+ */
+export async function listAllSourceUrls(): Promise<string[]> {
+  await ensureSchema();
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    const rows = await sql(`select source_url from news_items`);
+    return rows.map((row) => String(row.source_url));
+  }
+  return [...mem().urls];
 }
 
 export type SearchSort = "new" | "relevant";
