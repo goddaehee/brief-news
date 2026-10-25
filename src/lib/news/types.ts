@@ -36,6 +36,50 @@ export type IngestPayload = {
   topics: string[];
   publishedAt?: number;
   keep?: boolean;
+  /** Phase 1 (2패스 데스크): Pass 1 사실 카드. 저장 시 repo가 무시하는 메타. */
+  card?: FactCard;
+  /** Phase 1: Pass 1 중요도 점수 (0~100). 거버너 순위·하한 판정용. */
+  score?: number;
+  /** Phase 1: 하드 게이트 적중 범주. 있으면 [중요] 보장. */
+  hardGate?: HardGate | null;
+  /** Phase 1: 보안 소스(SEC_TITLE_HINT 통과) 여부. 거버너 비율 상한 밖. */
+  secHint?: boolean;
+  /** Phase 1: 원문 대조 검증 실패로 보류(keep=false)된 경우 true. */
+  held?: boolean;
+};
+
+/** Phase 1 하드 게이트 범주 — 적중하면 등급 거버너와 무관하게 [중요] 보장. */
+export type HardGate = "supply-chain" | "malware" | "cve" | "outage" | "price-today";
+
+/** 사실의 확정 상태. claim/allegation은 제목·시사점에서 사실로 단정하면 안 된다. */
+export type FactStatus = "confirmed" | "claim" | "allegation";
+
+/**
+ * Phase 1 Pass 1 산출물 — 사실 카드.
+ * 등급·제목·시사점은 여기서 확정하지 않는다. Pass 2는 이 카드와 원문만으로 쓴다.
+ */
+export type FactCard = {
+  status: FactStatus;
+  /** 원문 표기 그대로의 고유명사 (한글 원문이면 한글, 영문이면 영문). */
+  entities: string[];
+  /** 이 기사의 entities 중 데스크 등록 표기(ENTITY_FORMS)가 있는 이름의 한글 표기만.
+   *  등록에 없는 외래 이름은 넣지 않는다 — Pass 2가 제목에서 라틴 표기를 유지한다. */
+  hangulForms: string[];
+  /** 무엇이 어떻게 달라졌나 — 변경점 한 줄. */
+  change: string;
+  /** 원문에 실제로 있는 수치만, 원문 표기 그대로. */
+  numbers: string[];
+  /** 근거 구절 — 원문에서 짧게 인용. */
+  evidence: string;
+  /** 중요도 점수 0~100 (등급이 아니라 순위·하한 판정용 원자재). */
+  importance: number;
+  /** 승격 근거 한 줄. 없으면 빈 문자열. */
+  promotionReason: string;
+  hardGate: HardGate | null;
+  /** 당일·즉시·진행 중 — 속보 판정용 사실 여부. */
+  immediate: boolean;
+  tip: boolean;
+  topics: string[];
 };
 
 /**
@@ -81,6 +125,14 @@ export type CollectStats = {
   partial?: boolean;
   /** partial일 때 실패한 단계 (pull/dedupe/batch/classify/insert/finalize) */
   failedStage?: string;
+  /** Phase 1 거버너: 비율 상한 때문에 [중요]→[참고]로 강등된 건수 (dropKeepFalse와 무관한 부가 정보). */
+  govDemoted?: number;
+  /** Phase 1 거버너: 이번 배치 편입 후 최근 40건 창의 [중요]급(속보 포함) 비율 (0~1). */
+  govShareAfter?: number;
+  /** Phase 1 거버너: 비율이 12~18% 밴드를 벗어났을 때의 검토 신호 (자동 강등 아님). */
+  govSignal?: string;
+  /** Phase 1: 원문 대조 검증 실패로 보류된 건수 (dropKeepFalse의 부분집합). */
+  deskHeld?: number;
 };
 
 export type CollectResult = {
