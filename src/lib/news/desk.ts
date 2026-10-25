@@ -1,5 +1,5 @@
 import { TOPIC_MAP } from "./topics";
-import type { Grade, IngestPayload, NewsItem } from "./types";
+import type { FactCard, FactStatus, Grade, HardGate, IngestPayload, NewsItem } from "./types";
 
 export const ALLOWED_TOPICS = Object.keys(TOPIC_MAP);
 
@@ -84,44 +84,50 @@ export function factPart(takeaway: string): string {
 
 export const LEAD_HINT = /마련했다|발표했다|밝혔다|나섰다|전했다|보도했다/;
 
-export const DESK_SYSTEM = `당신은 한국 AI 실무자용 뉴스 터미널 brief_의 편집장이다.
-원문을 번역·축약하지 말고, 데스크가 다시 쓴다. JSON만 출력.
+// ============================================================================
+// Phase 1: 2패스 데스크 (plan-final.md Phase 1)
+// Pass 1 = 사실 카드 + 중요도 점수 + 승격 근거 (등급·제목·시사점을 확정하지 않음)
+// Pass 2 = 사실 카드 기반으로만 제목·시사점 작성 + 원문 대조 검증 (collect.ts)
+// 등급은 LLM이 아니라 코드가 정한다 — decideGrade(하드 게이트·점수·신호) +
+// collect.ts의 등급 거버너(최근 40건 비율 12~18%).
+// ============================================================================
 
-헤드라인
-- 28~44자. 원문 제목 복사 금지. 부제·수치 나열 꼬리 자를 것.
-- 주어(회사·제품·규제) + 행위. 제품·법안 이름만 '따옴표'.
-- 말줄임표는 ... (점 세 개). 신문 인용문("기다릴 가치 있다")은 제목 끝이 짧을 때만.
+export const FACT_SYSTEM = `당신은 한국 AI 실무자용 뉴스 터미널 brief_의 사실 분석가다.
+기사에서 사실만 구조화해 뽑는다. 제목·시사점·등급은 절대 쓰지 않는다. JSON만 출력.
 
-시사점 takeaway — 원본 문장 뼈대
-- 정확히 두 조각: "사실 한 줄. 할 일 한 줄."
-- 첫 문장(사실)은 제목을 베껴쓰지 말고 해석을 얹을 것. 예: 제목이 "오픈AI 엔지니어 체포"라면 "내부자 위협 현실화."처럼 사건에 프레임을 씌울 것. "엔지니어가 체포됐다"는 리드 복사에 불과.
-- 할 일은 구체적 행동으로: 누가 무엇을 해야 하는지 명시 ("도입 전 가격 비교 권장", "API 사용 중이면 폴백 로직 점검 필요").
-- 할 일은 제목의 주장 방향과 일치시킬 것. 제목이 "쿼터 축소 의혹"이면 "축소 여부 확인 필요"처럼 같은 방향으로 — 반대 방향("상향 여부 확인") 금지.
-- 금지: "~주시 필요", "~동향 주시", "~영향 주시", "~검토할 시점", "~검증해볼 시점", "~참고할 만함" 같은 관망형·모호한 어미. 막연한 표현으로 끝내지 말 것. 할 일 문장은 반드시 필요/검토/권장/주시/기회 중 하나로 끝낼 것. "확인."·"점검."으로만 끝내는 미완결 종결 금지 ("확인 필요"처럼 필요를 붙일 것).
-- 제품·모델명은 한글 표기를 우선한다. 영문만으로 널리 쓰이는 이름(GPT-5, API 등)은 영문 그대로 쓴다. '영문(한글)' 병기는 쓰지 않는다.
-- 고유명사 표기 고정: Gemini→'제미나이' (지미니 오기 금지), Kimi→'키미' (킴이 오기 금지), Canva→'캔바', Smaug→'스마우그'.
-- 원문 첫 문장·리드 복사 금지. 명령조(해라·하라) 금지.
-- 에디토리얼 프레임: 사건에 의미를 부여하는 한 단어를 첫 문장에 넣을 것.
-  - 파산/몰락: "활성 1200만 서비스도 수익성·안전 소송에 무너져." (X: "파산 보호를 신청하고 매각을 추진 중")
-  - 데이터 집중: "정부 사업 데이터가 AI허브로 집결." (X: "학습데이터의 개방이 법적으로 묶임")
-  - 병목: "AI 도구만으론 부서 간 협업·승인 병목이 생산성을 가로막음." (X: "도구 도입이 늘고 있다")
-  - 비용 누적: "에이전트의 백그라운드 자율 실행이 조용히 비용을 누적시킴." (X: "에이전트가 실행된다")
-
-요약 summary
-- 3문장. 사실만. 시사점과 겹치지 말 것.
-
-등급 grade — 목표 분포: breaking 2~3%, important 12~18%, 나머지는 note.
-- breaking: 지금 진행 중인 대형 서비스 장애, 당일 긴급 발표된 주요 출시, 즉시 적용되는 가격·정책 변경.
-- important: 주요 모델·제품의 출시/공개, 가격·요금제 변동, 보안 취약점 발견, 대규모 계약·투자·인수합병, 규제·제재 발표, 업계 판도를 바꾸는 소식 — 이번 주 실무에 바로 닿는 것.
-- important 제외 (note 이하): 벤더의 자체 역량·수치 홍보("위협 탐지 역량 23배 확대"), 하드웨어 액세서리(전력 모듈·쿨링·서버랙), 특정 지역 한정 출시("일본 출시"), M&A 논의·추진·검토 단계의 주식·지배구조 소식, 개인의 의견·전망 기사. 단 AI 랩의 대규모 인수합병 완료 건은 important.
-- AI와 직접 관련 없는 M&A·지배구조·주식·공시 기사는 keep=false.
-- tip: 무료 모델 공개, 프롬프트 기법, 로컬 LLM 설정법처럼 오늘 바로 쓰는 실용 정보. 침해 사고·보안 경고는 tip이 아니라 important/note.
-- note: 위 어디에도 해당하지 않는 일반 업계 동향.
+사실 카드 필드
+- status: 사실의 확정 상태.
+  - "confirmed": 공식 발표·문서·수치로 확인된 사실.
+  - "claim": 특정 주체(회사·연구자·보도)의 주장·발표 수준. 검증이 끝나지 않았다.
+  - "allegation": 의혹·논란·혐의 제기. 사실로 확정되지 않았다.
+- entities: 기사에 등장하는 회사·제품·인물·법안 고유명사를 **원문 표기 그대로** (영문 원문이면 영문, 한글이면 한글). 임의로 음역하거나 번역하지 말 것.
+- change: 무엇이 어떻게 달라졌나, 변경점 한 줄 (한국어).
+- numbers: 원문에 실제로 등장하는 수치만, 원문 표기 그대로 배열로. 없는 수치를 만들지 말 것.
+- evidence: 원문에서 근거 구절을 짧게 인용 (원문 언어 그대로).
+- importance: 중요도 점수 0~100. 등급이 아니라 순위를 매기기 위한 원자재다.
+  - 90+: 업계 판도를 바꾸는 사건 — 대형 서비스 장애·대규모 침해·주요 랩의 대표 모델 출시·법안 통과.
+  - 70~89: 이번 주 실무에 바로 닿는 것 — 주요 모델·제품 출시/공개, 가격·요금제 변동, 보안 취약점, 대규모 계약·투자·인수 완료, 규제·제재 발표, 출시 연기.
+  - 50~69: 의미 있는 업계 동향 — 일반 제품 소식, 연구 결과, 파트너십, 지역 출시.
+  - 30~49: 단신·홍보성 — 벤더 자체 역량·수치 홍보, 하드웨어 액세서리, 의견·전망 기사.
+  - 0~29: 실무 무관에 가까움.
+- promotionReason: [중요] 후보라고 보는 근거 한 줄. 해당 없으면 빈 문자열.
+- hardGate: 아래 범주에 정확히 해당하면 그 값, 아니면 null.
+  - "supply-chain": 패키지·모델·데이터셋 공급망 공격 (악성 패키지 배포, 백도어 삽입 등).
+  - "malware": 악성코드·랜섬웨어·침해 도구 자체가 주제인 사건.
+  - "cve": CVE 번호가 부여된 취약점, 또는 패치가 필요한 구체적 취약점 공개.
+  - "outage": 서비스 장애·중단·다운.
+  - "price-today": 당일 적용되는 가격·요금제·쿼터 변경.
+- immediate: 당일·즉시 적용되거나 지금 진행 중인 사건이면 true.
+- tip: 무료 모델 공개, 프롬프트 기법, 로컬 LLM 설정법처럼 오늘 바로 쓰는 실용 정보면 true. 침해 사고·보안 경고는 tip이 아니다.
+- hangulForms: entities 중 아래 **데스크 등록 표기**가 있는 이름의 한글 표기만 배열로. 등록 표기에 없는 외래 이름은 넣지 말 것 (제목에서 라틴 표기를 유지하게 된다).
+  등록 표기: Gemini→제미나이, Kimi→키미, Canva→캔바, Smaug→스마우그, Anthropic→앤트로픽, Hugging Face→허깅페이스, DeepSeek→딥시크, DeepMind→딥마인드, NVIDIA→엔비디아, Google→구글, Meta→메타, Apple→애플, Amazon→아마존, Tesla→테슬라, Disney→디즈니, Microsoft→마이크로소프트, OpenAI→오픈AI, ChatGPT→챗GPT, Claude→클로드, Grok→그록, Llama→라마, Mistral→미스트랄, Qwen→큐원, Codex→코덱스, Cursor→커서, Railway→레일웨이, Opus→오퍼스, Cognition→코그니션, Snowflake→스노우플레이크, Nemotron→네모트론, a16z→에이16지, ForTy→포티, Argon→아르곤.
+- topics: 아래 허용값 중에서.
 
 keep=false
-- 주식·공시·특징주, 유튜브 라운드업, AI 무관, 만찬·참석·동행·포토, 인사 단신, 연예·문화·문학 화제, 개인 회고·감상 인터뷰, 소액 정부 지원 단신.`;
+- 주식·공시·특징주, 유튜브 라운드업, AI 무관, 만찬·참석·동행·포토, 인사 단신, 연예·문화·문학 화제, 개인 회고·감상 인터뷰, 소액 정부 지원 단신.
+- AI와 직접 관련 없는 M&A·지배구조·주식·공시 기사도 keep=false.`;
 
-export function deskUser(entry: {
+export function factUser(entry: {
   title: string;
   source: string;
   sourceUrl: string;
@@ -130,22 +136,122 @@ export function deskUser(entry: {
   return `원문 제목: ${entry.title}
 출처: ${entry.source}
 링크: ${entry.sourceUrl}
-발췌: ${entry.summary.slice(0, 500)}
-
-예시(스타일만 복사, 내용 베끼지 말 것):
-{"keep":true,"title":"오픈AI, 주요 신제품 출시 다음 주로 연기","takeaway":"대형 신제품 일주일 연기. 다음 주 발표에 맞춰 도입 계획 조정 필요.","summary":"오픈AI가 신제품 공개를 다음 주로 미뤘다. 데브데이 일정과 맞춘다. 기존 도입 일정을 한 주 뒤로 밀 여지가 있다.","grade":"important","tip":false,"topics":["openai"]}
-{"keep":true,"title":"오픈AI, 'AI 정렬 실패' 사례 보고 체계 구축","takeaway":"모델 안전성·투명성 검증 절차 강화. 정렬 문제 대응 공론화에 대비 필요.","summary":"오픈AI가 정렬 실패 사례를 추적해 공개하는 보고 체계를 마련했다. 예상 밖 모델 행동을 조사 대상으로 올린다. 안전 거버넌스 논의가 제품 일정에 붙을 수 있다.","grade":"note","tip":false,"topics":["openai"]}
-{"keep":true,"title":"협업툴 '플로우', 챗GPT·클로드 공식 앱 입점","takeaway":"국내 협업툴에서 챗GPT·클로드를 기본 연동할 수 있게 됨. 기업 워크플로우 적용 검토.","summary":"플로우가 챗GPT와 클로드 공식 앱을 등록했다. 메신저 안에서 두 모델을 호출한다. 국산 협업툴 중 공식 입점은 처음이다.","grade":"note","tip":false,"topics":["korea-ai","agent"]}
-{"keep":true,"title":"오픈AI, API 장문 입력 요금 인하","takeaway":"장문 컨텍스트 호출 비용 부담 완화. 대량 문서 처리 워크로드라면 새 요금제 적용 시점 확인.","summary":"오픈AI가 API 장문 입력 요금을 인하했다. 128K 이상 구간 단가가 조정된다. 기존 배치 작업의 비용 재산정이 가능하다.","grade":"important","tip":false,"topics":["openai"]}
-{"keep":true,"title":"앤트로픽, 클로드 API 장애 복구","takeaway":"2시간 장애 후 정상화. 클로드 API 연동 서비스는 장애 시간대 요청 누락 여부 점검.","summary":"앤트로픽 클로드 API에서 2시간 장애가 발생했다. 상태 페이지에 공지됐다. 현재는 정상화됐다.","grade":"important","tip":false,"topics":["anthropic"]}
-{"keep":true,"title":"과기정통부, AI 기본법 시행령 입법예고","takeaway":"고영향 AI 의무 조항 세부 기준 공개. 해당 사업자는 의견 수렴 기간 내 적용 범위 주시.","summary":"과기정통부가 AI 기본법 시행령을 입법예고했다. 고영향 AI 판정 기준이 담겼다. 의견 수렴은 다음 달까지다.","grade":"note","tip":false,"topics":["korea-ai","regulation"]}
-{"keep":true,"title":"슈나이더, 엔비디아 'GB300' 맞춤 전력 모듈 선봬","takeaway":"데이터센터 전력 장비 선택지 확대. 도입 예정 기업은 전력·냉각 요구 조건 비교 권장.","summary":"슈나이더가 GB300용 2.5MW 전력 모듈을 공개했다. 액체 냉각 대응 제품이다. 인프라 투자 계획이 있는 기업만 보면 된다.","grade":"note","tip":false,"topics":["hardware"]}
-{"keep":true,"title":"게임 NPC 실시간 대화 구현 도구 'NPCTalk' 공개","takeaway":"오픈소스 NPC 대화 도구 등장. 유니티·언리얼 연동 예제가 있어 바로 실험해볼 기회.","summary":"NPCTalk가 공개됐다. 게임 NPC와 실시간 대화할 수 있는 오픈소스 도구다. 유니티와 언리얼 플러그인을 제공한다.","grade":"note","tip":true,"topics":["open-source"]}
-{"keep":false,"title":"","takeaway":"","summary":"","grade":"note","tip":false,"topics":[]}
+발췌: ${entry.summary.slice(0, 700)}
 
 JSON 스키마:
-{"keep":true,"title":"한국어 헤드라인","takeaway":"사실. 할 일.","summary":"3문장","grade":"breaking|important|note","tip":false,"topics":["openai"]}
+{"keep":true,"status":"confirmed|claim|allegation","entities":["원문 표기 그대로"],"hangulForms":["등록 표기가 있는 이름의 한글 표기만"],"change":"변경점 한 줄","numbers":["원문 수치 그대로"],"evidence":"원문 근거 구절 인용","importance":0,"promotionReason":"","hardGate":null,"immediate":false,"tip":false,"topics":["openai"]}
+hardGate 허용값: "supply-chain" | "malware" | "cve" | "outage" | "price-today" | null
 topics 허용값: ${ALLOWED_TOPICS.join(", ")}`;
+}
+
+const HARD_GATES: HardGate[] = ["supply-chain", "malware", "cve", "outage", "price-today"];
+
+/** Pass 1 JSON → 사실 카드. 형식이 깨졌으면 null (호출측이 폴백 처리).
+ *  status는 필수 — 누락·무효값을 confirmed로 승격하면 상태 검증 전체가
+ *  무력화되므로 카드를 거부한다 (Codex 리뷰 P1). */
+export function parseFactCard(json: Record<string, unknown>): FactCard | null {
+  if (json.status !== "confirmed" && json.status !== "claim" && json.status !== "allegation") {
+    return null;
+  }
+  const status: FactStatus = json.status;
+  const entities = Array.isArray(json.entities)
+    ? json.entities.filter((x): x is string => typeof x === "string" && x.trim().length > 0).slice(0, 12)
+    : [];
+  const numbers = Array.isArray(json.numbers)
+    ? json.numbers.filter((x): x is string | number => typeof x === "string" || typeof x === "number").map(String).slice(0, 12)
+    : [];
+  const importanceRaw = typeof json.importance === "number" ? json.importance : Number(json.importance);
+  if (!Number.isFinite(importanceRaw)) return null;
+  const hardGate =
+    typeof json.hardGate === "string" && (HARD_GATES as string[]).includes(json.hardGate)
+      ? (json.hardGate as HardGate)
+      : null;
+  const topics = Array.isArray(json.topics)
+    ? json.topics.filter((x): x is string => typeof x === "string" && Boolean(TOPIC_MAP[x])).slice(0, 4)
+    : [];
+  // hangulForms는 등록 표기(ENTITY_FORMS의 값)만 인정 — 모델이 임의 음역을
+  // "등록 표기"라고 주장하는 것을 코드가 걸러낸다 (엔티티 잠금).
+  const registeredForms = new Set(ENTITY_FORMS.map(([, hangul]) => hangul));
+  const hangulForms = Array.isArray(json.hangulForms)
+    ? json.hangulForms.filter((x): x is string => typeof x === "string" && registeredForms.has(x)).slice(0, 12)
+    : [];
+  return {
+    status,
+    entities,
+    hangulForms,
+    change: typeof json.change === "string" ? json.change : "",
+    numbers,
+    evidence: typeof json.evidence === "string" ? json.evidence : "",
+    importance: Math.max(0, Math.min(100, Math.round(importanceRaw))),
+    promotionReason: typeof json.promotionReason === "string" ? json.promotionReason : "",
+    hardGate,
+    immediate: json.immediate === true,
+    tip: json.tip === true,
+    topics,
+  };
+}
+
+export const WRITE_SYSTEM = `당신은 한국 AI 실무자용 뉴스 터미널 brief_의 편집장이다.
+입력으로 주어지는 **사실 카드와 원문만** 근거로 제목·시사점·요약을 다시 쓴다. JSON만 출력.
+등급은 당신이 정하지 않는다 (출력에 포함하지 말 것).
+
+사실 카드 준수 규칙 (원문 대조 검증 대상)
+- 고유명사는 사실 카드 entities의 표기를 기준으로 쓴다. 카드에 없는 회사·제품·인물명을 새로 만들지 말 것.
+- 수치는 사실 카드 numbers와 원문에 있는 것만 쓴다. 수치 변경·반올림·새 수치 생성 금지.
+- status가 "claim"이면 주장으로, "allegation"이면 의혹·논란으로 쓴다. 사실로 단정하지 말 것.
+- 할 일 문장은 제목·사실의 방향과 일치시킬 것. 제목이 "쿼터 축소 의혹"이면 "축소 여부 확인 필요"처럼 같은 방향으로 — 반대 방향("상향 여부 확인") 금지.
+
+헤드라인
+- 28~44자. 원문 제목 복사 금지. 부제·수치 나열 꼬리 자를 것.
+- 주어(회사·제품·규제) + 행위. 제품·법안 이름만 '따옴표'.
+- 말줄임표는 ... (점 세 개). 신문 인용문("기다릴 가치 있다")은 제목 끝이 짧을 때만.
+- 제품·모델명은 사실 카드 hangulForms에 있는 등록 표기만 한글로 쓴다. hangulForms에 없는 외래 고유명사는 원문(라틴) 표기를 그대로 유지한다 — 임의 한글 음역 금지.
+- usedNames: 제목에 쓴 고유명사를 **제목에 쓴 표기 그대로** 전부 나열한다. 검증에 쓰이므로 빠뜨리지 말 것.
+
+시사점 takeaway — 원본 문장 뼈대
+- 정확히 두 조각: "사실 한 줄. 할 일 한 줄."
+- 첫 문장(사실)은 제목을 베껴쓰지 말고 해석을 얹을 것. 예: 제목이 "오픈AI 엔지니어 체포"라면 "내부자 위협 현실화."처럼 사건에 프레임을 씌울 것. "엔지니어가 체포됐다"는 리드 복사에 불과.
+- 할 일은 구체적 행동으로: 누가 무엇을 해야 하는지 명시 ("도입 전 가격 비교 권장", "API 사용 중이면 폴백 로직 점검 필요").
+- 금지: "~주시 필요", "~동향 주시", "~영향 주시", "~검토할 시점", "~검증해볼 시점", "~참고할 만함" 같은 관망형·모호한 어미. 막연한 표현으로 끝내지 말 것. 할 일 문장은 반드시 필요/검토/권장/주시/기회 중 하나로 끝낼 것. "확인."·"점검."으로만 끝내는 미완결 종결 금지 ("확인 필요"처럼 필요를 붙일 것).
+- 제품·모델명은 한글 표기를 우선한다. 영문만으로 널리 쓰이는 이름(GPT-5, API 등)은 영문 그대로 쓴다. '영문(한글)' 병기는 쓰지 않는다.
+- 원문 첫 문장·리드 복사 금지. 명령조(해라·하라) 금지.
+- 에디토리얼 프레임: 사건에 의미를 부여하는 한 단어를 첫 문장에 넣을 것.
+  - 파산/몰락: "활성 1200만 서비스도 수익성·안전 소송에 무너져." (X: "파산 보호를 신청하고 매각을 추진 중")
+  - 데이터 집중: "정부 사업 데이터가 AI허브로 집결." (X: "학습데이터의 개방이 법적으로 묶임")
+  - 병목: "AI 도구만으론 부서 간 협업·승인 병목이 생산성을 가로막음." (X: "도구 도입이 늘고 있다")
+  - 비용 누적: "에이전트의 백그라운드 자율 실행이 조용히 비용을 누적시킴." (X: "에이전트가 실행된다")
+
+요약 summary
+- 3문장. 사실만. 시사점과 겹치지 말 것.`;
+
+export function writeUser(
+  entry: { title: string; source: string; sourceUrl: string; summary: string },
+  card: FactCard,
+  feedback?: { prevTitle: string; problems: string[] } | null,
+): string {
+  const fb = feedback
+    ? `\n\n[재작성 지시] 직전 제목 "${feedback.prevTitle}"에 아래 문제가 있었다. 같은 사실을 유지하되 문제를 전부 고쳐서 다시 출력하라.\n${feedback.problems.map((p) => `- ${p}`).join("\n")}`
+    : "";
+  return `원문 제목: ${entry.title}
+출처: ${entry.source}
+링크: ${entry.sourceUrl}
+발췌: ${entry.summary.slice(0, 500)}
+
+사실 카드 (이 범위 밖의 사실을 만들지 말 것):
+${JSON.stringify(card)}
+
+예시(스타일만 복사, 내용 베끼지 말 것):
+{"title":"오픈AI, 주요 신제품 출시 다음 주로 연기","takeaway":"대형 신제품 일주일 연기. 다음 주 발표에 맞춰 도입 계획 조정 필요.","summary":"오픈AI가 신제품 공개를 다음 주로 미뤘다. 데브데이 일정과 맞춘다. 기존 도입 일정을 한 주 뒤로 밀 여지가 있다.","usedNames":["오픈AI"]}
+{"title":"오픈AI, 'AI 정렬 실패' 사례 보고 체계 구축","takeaway":"모델 안전성·투명성 검증 절차 강화. 정렬 문제 대응 공론화에 대비 필요.","summary":"오픈AI가 정렬 실패 사례를 추적해 공개하는 보고 체계를 마련했다. 예상 밖 모델 행동을 조사 대상으로 올린다. 안전 거버넌스 논의가 제품 일정에 붙을 수 있다.","usedNames":["오픈AI"]}
+{"title":"협업툴 '플로우', 챗GPT·클로드 공식 앱 입점","takeaway":"국내 협업툴에서 챗GPT·클로드를 기본 연동할 수 있게 됨. 기업 워크플로우 적용 검토.","summary":"플로우가 챗GPT와 클로드 공식 앱을 등록했다. 메신저 안에서 두 모델을 호출한다. 국산 협업툴 중 공식 입점은 처음이다.","usedNames":["플로우","챗GPT","클로드"]}
+{"title":"오픈AI, API 장문 입력 요금 인하","takeaway":"장문 컨텍스트 호출 비용 부담 완화. 대량 문서 처리 워크로드라면 새 요금제 적용 시점 확인.","summary":"오픈AI가 API 장문 입력 요금을 인하했다. 128K 이상 구간 단가가 조정된다. 기존 배치 작업의 비용 재산정이 가능하다.","usedNames":["오픈AI"]}
+{"title":"앤트로픽, 클로드 API 장애 복구","takeaway":"2시간 장애 후 정상화. 클로드 API 연동 서비스는 장애 시간대 요청 누락 여부 점검.","summary":"앤트로픽 클로드 API에서 2시간 장애가 발생했다. 상태 페이지에 공지됐다. 현재는 정상화됐다.","usedNames":["앤트로픽","클로드"]}
+{"title":"과기정통부, AI 기본법 시행령 입법예고","takeaway":"고영향 AI 의무 조항 세부 기준 공개. 해당 사업자는 의견 수렴 기간 내 적용 범위 주시.","summary":"과기정통부가 AI 기본법 시행령을 입법예고했다. 고영향 AI 판정 기준이 담겼다. 의견 수렴은 다음 달까지다.","usedNames":["과기정통부"]}
+{"title":"슈나이더, 엔비디아 'GB300' 맞춤 전력 모듈 선봬","takeaway":"데이터센터 전력 장비 선택지 확대. 도입 예정 기업은 전력·냉각 요구 조건 비교 권장.","summary":"슈나이더가 GB300용 2.5MW 전력 모듈을 공개했다. 액체 냉각 대응 제품이다. 인프라 투자 계획이 있는 기업만 보면 된다.","usedNames":["슈나이더","엔비디아","GB300"]}
+{"title":"게임 NPC 실시간 대화 구현 도구 'NPCTalk' 공개","takeaway":"오픈소스 NPC 대화 도구 등장. 유니티·언리얼 연동 예제가 있어 바로 실험해볼 기회.","summary":"NPCTalk가 공개됐다. 게임 NPC와 실시간 대화할 수 있는 오픈소스 도구다. 유니티와 언리얼 플러그인을 제공한다.","usedNames":["NPCTalk"]}
+
+JSON 스키마:
+{"title":"한국어 헤드라인","takeaway":"사실. 할 일.","summary":"3문장","usedNames":["제목에 쓴 고유명사 표기 그대로"]}${fb}`;
 }
 
 function hangulLen(s: string): number {
@@ -338,20 +444,45 @@ export function polishTakeaway(raw: string): string {
   return t;
 }
 
-export function polishGrade(grade: Grade, title: string, takeaway: string, originalTitle = ""): Grade {
-  // 16차: 승격 게이트는 제목 + 시사점 사실 부분만 본다 (할 일 상용구 오탐 방지)
+/** Phase 1: 중요도 점수 절대 하한 — 미달이면 쿼터(거버너 여유)가 남아도 승격 금지. */
+export const IMPORTANCE_FLOOR = 70;
+
+/** 하드 게이트의 결정론 근사 — needsRewrite가 [중요] 유지 타당성을 볼 때 쓴다.
+ *  STRONG_HINT가 이미 커버하는 범주(장애·취약점·가격·공격) 외에, 신호 단어 없이도
+ *  게이트로 승격되는 공급망·악성 패키지 패턴만 명시한다. */
+export const HARD_GATE_HINT = /공급망|악성\s*(패키지|코드|모듈|라이브러리)|백도어/;
+
+/**
+ * Phase 1 등급 결정 (단일 기사 기준). LLM은 등급을 정하지 않는다.
+ * 1) 하드 게이트 적중 → [중요] 보장. outage/price-today + 당일·진행 중이면 [속보].
+ * 2) NOTE_FORCE(벤더 홍보·액세서리·지역 출시·M&A 논의) → [참고] (기존 과승격 교정 유지).
+ * 3) 중요도 점수 ≥ IMPORTANCE_FLOOR 이고 강한 신호가 있을 때만 [중요] 후보.
+ *    점수만으로 신호 없이 승격시키지 않는 이유: needsRewrite의 [중요] 타당성 검사가
+ *    hasStrongSignal 기준이라, 신호 없는 [중요]는 재작성 큐에서 영원히 핑퐁한다.
+ *    분포 조정(순위·쿼터)은 이 후보군 안에서 거버너(collect.ts)가 담당한다.
+ */
+export function decideGrade(
+  card: FactCard,
+  title: string,
+  takeaway: string,
+  originalTitle = "",
+): Grade {
   const t = `${title} ${factPart(takeaway)}`;
-  if (grade === "breaking" && !/장애|다운|중단|지연|가격|인하|인상/.test(t)) return "note";
-  // 32차: 강등·승격 모두 hasStrongSignal 단일 기준으로 통일.
-  // 기존 IMPORTANT_HINT는 "규제·정책·법안" 같은 약한 단어만으로도 [중요]를 유지시켜
-  // 주장성 기사(휴깅페이스 "규제 산업 전환 가속")가 과승격됐다 (31차 패널).
-  let g = grade;
-  // 36차: NOTE_FORCE가 걸리면 승격 라인이 다시 올리지 못하게 forced 플래그로 차단.
-  const forced = forceNoteReason(title, takeaway);
-  if (g === "important" && !forced && !hasStrongSignal(title, takeaway, originalTitle)) g = "note";
-  if (g === "important" && forced) g = "note";
-  if (g === "note" && !forced && hasStrongSignal(title, takeaway, originalTitle)) return "important";
-  return g;
+  if (card.hardGate) {
+    if (
+      (card.hardGate === "outage" || card.hardGate === "price-today") &&
+      card.immediate &&
+      /장애|다운|중단|가격|인하|인상/.test(t)
+    ) {
+      return "breaking";
+    }
+    return "important";
+  }
+  if (forceNoteReason(title, takeaway)) return "note";
+  if (card.importance >= IMPORTANCE_FLOOR && hasStrongSignal(title, takeaway, originalTitle)) {
+    return "important";
+  }
+  return "note";
 }
 
 /** 36차: [중요] 강등 강제 패턴. hasStrongSignal이 true여도 note로 내린다.
@@ -474,11 +605,25 @@ export function needsRewrite(
   if (/해라|하라/.test(item.takeaway)) return true;
   if (/[A-Za-z]{4,}·[A-Za-z]{4,}/.test(item.takeaway)) return true;
   // 16차: 힌트 검사는 시사점 사실 부분만 (할 일 상용구 오탐 방지).
-  // 32차: polishGrade와 동일하게 hasStrongSignal 단일 기준으로 통일 (핑퐁 방지).
-  if (item.grade === "important" && !hasStrongSignal(item.title, item.takeaway, item.originalTitle)) return true;
+  // 32차: 등급 결정과 동일하게 hasStrongSignal 단일 기준으로 통일 (핑퐁 방지).
+  // Phase 1: 하드 게이트(공급망·악성 패키지) 승격분은 신호가 없어도 [중요] 유지가
+  // 정상이므로 재작성 대상에서 제외한다 (decideGrade와 정합).
+  if (
+    item.grade === "important" &&
+    !hasStrongSignal(item.title, item.takeaway, item.originalTitle) &&
+    !HARD_GATE_HINT.test(`${item.title} ${factPart(item.takeaway)}`)
+  )
+    return true;
   // 36차: NOTE_FORCE 강등 대상도 재작성 큐로 — 기존 과승격분(B01/B07/B08/B24류)이
-  // polishGrade에서 note로 내려가게. 없으면 영원히 [중요]로 잔류함.
-  if (item.grade === "important" && forceNoteReason(item.title, item.takeaway)) return true;
+  // 등급 결정에서 note로 내려가게. 없으면 영원히 [중요]로 잔류함.
+  // Phase 1 (Codex 리뷰 P2): 하드 게이트 승격분은 decideGrade와 우선순위를 맞춰
+  // 면제한다 — 겹치면 재작성할 때마다 중요로 돌아와 큐에 영원히 남는다.
+  if (
+    item.grade === "important" &&
+    forceNoteReason(item.title, item.takeaway) &&
+    !HARD_GATE_HINT.test(`${item.title} ${factPart(item.takeaway)}`)
+  )
+    return true;
   // 승격: [참고]인데 강한 중요 신호가 있으면 재작성 → polishGrade 승격 로직이 적용됨
   // (기존 [참고] 기사는 승격 로직 배포 전 분류분이라 재작성이 필요)
   // 36차 재심 (Codex): NOTE_FORCE 강등 대상은 승격 재작성에서 제외 — 강등 후에도
@@ -577,29 +722,1043 @@ function fixTypos(s: string): string {
 // 28차 P0: X ingest 경로에서 사용 — desk 품질 게이트
 export { fixTypos };
 
-export function polishPayload(
-  json: Record<string, unknown>,
+// ============================================================================
+// Phase 1: 엔티티 잠금 (plan-final.md Phase 1)
+// 한글 음역은 등록 표기(ENTITY_FORMS)만 허용하고, 없으면 라틴 표기를 유지한다.
+//
+// 설계 근거 (실측 보정): "제목의 모든 한글 토큰을 허용 집합과 대조"하는 전면
+// 허용목록 방식은 실제 제목 90건(양쪽 RSS)으로 보정한 결과 89건이 오탐이었다 —
+// 한국어 제목 어휘(전략·도구·소진 같은 일반 단어)를 사전으로 열거할 수 없기
+// 때문이다. 그래서 잠금은 피해가 실증된 두 채널로 구조화한다.
+//  1) 근접 오형 검출: 등록 표기와 편집거리 가까운 한글 토큰(지미니↔제미나이,
+//     킴이↔키미, 스모그↔스마우그, 휴깅↔허깅, 앤스로픽↔앤트로픽)은 오역·오타로
+//     보고 위반 처리한다. 원문(한국어 출처)에 그대로 있는 토큰은 면제.
+//  2) usedNames 추적: Pass 2가 제목에 쓴 고유명사를 스스로 선언하게 하고,
+//     각 표기가 카드 entities·등록 표기·원문 중 하나로 추적되지 않으면 위반.
+//     임의 음역(레일웨이식 신규 음역 포함)은 여기서 걸린다.
+// 오타 사전(TYPO_FIX)에 표제어를 추가하는 패치는 이 구조로 대체하고 중단한다
+// (36차가 마지막 — plan-final.md 중단 목록). ENTITY_FORMS의 등록분은 기존
+// 음역 사전(normalizeProductNames·DISPLAY_NAME_MAP·데스크 표기 고정·
+// polishTakeaway 병기 교정)에서 이미 확정된 표기의 이관이다.
+// ============================================================================
+
+/** 데스크 등록 표기 (라틴 원형 → 한글 표기). 여기 없는 외래 이름은 라틴 유지. */
+export const ENTITY_FORMS: [string, string][] = [
+  ["Gemini", "제미나이"],
+  ["Kimi", "키미"],
+  ["Canva", "캔바"],
+  ["Smaug", "스마우그"],
+  ["Anthropic", "앤트로픽"],
+  ["Hugging Face", "허깅페이스"],
+  ["DeepSeek", "딥시크"],
+  ["DeepMind", "딥마인드"],
+  ["NVIDIA", "엔비디아"],
+  ["Google", "구글"],
+  ["Meta", "메타"],
+  ["Apple", "애플"],
+  ["Amazon", "아마존"],
+  ["Tesla", "테슬라"],
+  ["Disney", "디즈니"],
+  ["Microsoft", "마이크로소프트"],
+  ["OpenAI", "오픈AI"],
+  ["ChatGPT", "챗GPT"],
+  ["Claude", "클로드"],
+  ["Grok", "그록"],
+  ["Llama", "라마"],
+  ["Mistral", "미스트랄"],
+  ["Qwen", "큐원"],
+  ["Codex", "코덱스"],
+  ["Cursor", "커서"],
+  ["Railway", "레일웨이"],
+  ["Opus", "오퍼스"],
+  ["Cognition", "코그니션"],
+  ["Snowflake", "스노우플레이크"],
+  ["Nemotron", "네모트론"],
+  ["a16z", "에이16지"],
+  ["ForTy", "포티"],
+  ["Argon", "아르곤"],
+];
+
+/** 한글 토큰 추출 (2자 이상 연속 한글). */
+function hangulTokens(s: string): string[] {
+  return s.match(/[가-힣]{2,}/g) ?? [];
+}
+
+/** 등록 표기의 한글 토큰 집합 (근접 오형 검출의 기준). */
+const REGISTERED_HANGUL_TOKENS = new Set(
+  ENTITY_FORMS.flatMap(([, hangul]) => hangulTokens(hangul)).filter((t) => t.length >= 2),
+);
+
+function levenshtein(a: string, b: string): number {
+  const ac = [...a];
+  const bc = [...b];
+  let prev = Array.from({ length: bc.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= ac.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= bc.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ac[i - 1] === bc[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[bc.length];
+}
+
+/** 근접 오형 검출에서 면제하는 일반 외래어 — 등록 표기와 음절이 겹치는
+ *  보통명사라 오형이 아니다 (클라우드↔클로드, 스마트↔스마우그). */
+const NEAR_MISS_EXEMPT = new Set(["클라우드", "스마트"]);
+
+/**
+ * 등록 표기의 근접 오형인지 판정한다.
+ * 실측 보정 (양쪽 RSS 제목 90건): 편집거리 ≤2 전면 적용은 코드↔코덱스,
+ * 구독↔구글 같은 무관한 단어까지 57건을 오탐했다. 그래서 규칙을 좁힌다.
+ * - 2음절 등록형(구글·키미·메타 등)은 대상에서 제외 — 그 오형(킴이·칸바)은
+ *   TYPO_HINT 린트와 usedNames 추적이 담당한다.
+ * - 같은 길이: 편집거리 ≤1 (앤스로픽↔앤트로픽, 휴깅페이스↔허깅페이스).
+ * - 길이 차 1: 음절 겹침 ≥2/3 + 편집거리 ≤2 (스모그↔스마우그).
+ * - 등록 표기로 시작하는 복합어(오픈소스·캔버스)는 면제.
+ * 지미니(↔제미나이, 편집거리 3)는 이 검출이 아니라 TYPO_HINT와
+ * usedNames 추적(카드에 없는 표기)이 잡는다.
+ */
+function isNearMissVariant(token: string, registered: string): boolean {
+  if (token.length < 3 || registered.length < 3) return false;
+  if (token === registered) return false;
+  if (NEAR_MISS_EXEMPT.has(token)) return false;
+  // 등록 토큰으로 시작하는 복합어(오픈소스·구글링·캔버스)는 그 자체로 면제
+  for (const head of REGISTERED_HANGUL_TOKENS) {
+    if (head.length >= 2 && token.startsWith(head)) return false;
+  }
+  const lenDiff = Math.abs(token.length - registered.length);
+  if (lenDiff > 1) return false;
+  if (lenDiff === 0) {
+    if (levenshtein(token, registered) > 1) return false;
+    // 치환된 음절이 자소(초성 또는 중성)를 공유할 때만 오형으로 본다 —
+    // "딥테크↔딥시크"처럼 자소가 전부 다른 실재 외래어를 오탐하지 않기
+    // 위해서다 (Codex 리뷰 21차 P2).
+    const a = [...token];
+    const b = [...registered];
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] === b[i]) continue;
+      const ca = a[i].codePointAt(0)! - 0xac00;
+      const cb = b[i].codePointAt(0)! - 0xac00;
+      if (ca < 0 || cb < 0) return false;
+      const choSame = Math.floor(ca / 588) === Math.floor(cb / 588);
+      const jungSame = Math.floor((ca % 588) / 28) === Math.floor((cb % 588) / 28);
+      if (!choSame && !jungSame) return false;
+    }
+    return true;
+  }
+  // 길이 차 1: 첫 음절이 같고(스모그↔스마우그) 음절 겹침 ≥2/3 + 편집거리 ≤2.
+  // 첫 음절 조건이 없으면 레트로↔앤트로픽(트·로 우연 겹침) 같은 오탐이 생긴다.
+  if (token[0] !== registered[0]) return false;
+  const regSyllables = [...registered];
+  const common = [...token].filter((ch) => {
+    const i = regSyllables.indexOf(ch);
+    if (i < 0) return false;
+    regSyllables.splice(i, 1);
+    return true;
+  }).length;
+  if (common * 3 < 2 * Math.min(token.length, registered.length)) return false;
+  return levenshtein(token, registered) <= 2;
+}
+
+/** 제목에서 등록 표기의 근접 오형 토큰을 찾는다 (엔티티 잠금 채널 1). */
+export function findNearMissEntities(title: string, sourceText: string): string[] {
+  const bad: string[] = [];
+  for (const token of hangulTokens(title)) {
+    if (REGISTERED_HANGUL_TOKENS.has(token)) continue;
+    if (sourceText.includes(token)) continue; // 원문이 쓴 표기는 원문 표기로 인정
+    for (const registered of REGISTERED_HANGUL_TOKENS) {
+      if (isNearMissVariant(token, registered)) {
+        if (!bad.includes(token)) bad.push(token);
+        break;
+      }
+    }
+  }
+  return bad;
+}
+
+const GENERIC_LATIN_WORDS = new Set([
+  "ai", "api", "llm", "gpu", "sdk", "os", "ui", "pc", "it",
+  "us", "uk", "eu", "un", "ceo", "cto", "cfo",
+  "app", "web", "the", "and", "for", "with", "new", "data",
+]);
+
+const nameNorm = (s: string) => s.replace(/\s+/g, "").toLowerCase();
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 라틴 이름이 단어 경계로 등장하는가 — "metadata"가 "Meta" 등장으로
+ *  오인되지 않게 경계를 검사한다 (Codex 리뷰 2차 P1). */
+function latinAppears(text: string, latin: string): boolean {
+  return new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(latin)}(?![A-Za-z0-9])`, "i").test(text);
+}
+
+/** 이 기사에 실제로 등장한 등록 표기 쌍만 추린다 (Codex 리뷰 P1:
+ *  등록 사전 전체를 허용하면 기사에 없는 회사명을 새로 넣어도 통과한다). */
+function presentRegisteredPairs(
+  card: FactCard,
+  entry: { title: string; summary: string },
+): [string, string][] {
+  const sourceText = `${entry.title} ${entry.summary}`;
+  // hangulForms는 모델 선언일 뿐 독립 근거가 아니다 — 대응 라틴명이
+  // 원문·entities에 있거나, 한글 표기 자체가 원문에 있을 때만 등장으로
+  // 인정한다 (Codex 리뷰 14차 P1).
+  return ENTITY_FORMS.filter(
+    ([latin, hangul]) =>
+      latinAppears(sourceText, latin) ||
+      card.entities.some((e) => latinAppears(e, latin)) ||
+      hangulNameAppears(sourceText, hangul),
+  );
+}
+
+const PARTICLE_SUFFIXES = [
+  "에서는", "으로는", "까지는", "에서도", "이라고", "라는", "가", "는", "은", "이",
+  "을", "를", "의", "와", "과", "도", "만", "에", "에서", "으로", "로", "부터",
+  "까지", "처럼", "보다", "께", "한테", "에게", "랑", "조차", "마저",
+];
+
+/** 토큰 전체가 숫자+측정 단위(+조사)인 형태 — 이름 후보에서 제외한다. */
+const MEASURE_TOKEN_RE = new RegExp(
+  `^\\d[\\d,]*(?:\\.\\d+)?(ms|gb|mb|tb|kb|mw|kw|ghz|mhz|khz|hz|mm|cm|km|kg|fps|rpm|px|달러|원|유로|토큰|밀리초|시간|개|건|명|회|종|위|점|배|%)(${[...PARTICLE_SUFFIXES].sort((a, b) => b.length - a.length).map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})?$`,
+  "i",
+);
+
+const REGISTERED_FORM_STRINGS = ENTITY_FORMS.map(([, hangul]) => hangul);
+const MIXED_REGISTERED_FORMS = REGISTERED_FORM_STRINGS.filter((h) => /[A-Za-z0-9]/.test(h));
+
+/** 한글 이름이 독립 표기(또는 조사 결합)로 등장했는지 — 부분 문자열
+ *  ("파이프라인" 속 "라인", "메타데이터" 속 "메타")은 등장이 아니다
+ *  (Codex 리뷰 15차 P1). */
+function hangulNameAppears(text: string, name: string): boolean {
+  if (/[A-Za-z0-9]/.test(name)) return mixedFormAppears(text, name);
+  return hangulTokens(text).some(
+    (t) => t === name || (t.startsWith(name) && PARTICLE_SUFFIXES.some((p) => t === name + p)),
+  );
+}
+
+/** 혼합형 등록 표기(오픈AI·챗GPT·에이16지)가 텍스트에 등장했는지 — 한글
+ *  토큰으로 쪼개면 "오픈"만 남아 "오픈소스" 같은 무관한 단어에 걸린다
+ *  (Codex 리뷰 8차 P1). 전체 표기 + 조사 결합까지만 등장으로 본다. */
+/** 혼합형 등록 표기의 유효 등장 위치들 — 양쪽 경계를 본다. 왼쪽에 글자가
+ *  붙으면 더 큰 이름의 일부("슈퍼챗GPT")이고, 오른쪽은 조사 뒤에 경계가
+ *  있어야 한다("오픈AI도우미"는 "오픈AI"+"도"가 아니다) (Codex 17·20차). */
+function mixedFormOccurrences(text: string, form: string): number[] {
+  const afterSuffixes = [...PARTICLE_SUFFIXES, "용"];
+  const out: number[] = [];
+  let idx = text.indexOf(form);
+  while (idx >= 0) {
+    const prev = idx > 0 ? text[idx - 1] : "";
+    if (!(prev && /[A-Za-z0-9가-힣]/.test(prev))) {
+      const rest = text.slice(idx + form.length);
+      if (!rest) out.push(idx);
+      else {
+        const next = rest[0];
+        if (/[^A-Za-z0-9가-힣]/.test(next)) out.push(idx);
+        else if (/[가-힣]/.test(next)) {
+          const ok = afterSuffixes.some((p) => {
+            if (!rest.startsWith(p)) return false;
+            const after = rest[p.length] ?? "";
+            return !after || /[^가-힣]/.test(after);
+          });
+          if (ok) out.push(idx);
+        }
+      }
+    }
+    idx = text.indexOf(form, idx + 1);
+  }
+  return out;
+}
+
+function mixedFormAppears(text: string, form: string): boolean {
+  return mixedFormOccurrences(text, form).length > 0;
+}
+
+/** 텍스트에서 고유명사 후보를 뽑는다 — 등록 한글형은 조사 결합형("메타가")도
+ *  잡고, 라틴은 소문자 시작("fakegpt")·2글자("HP")도 후보에 넣는다
+ *  (Codex 리뷰 5·6차 P1). */
+function candidateNames(text: string): string[] {
+  const hTokens = hangulTokens(text);
+  return [
+    ...[...REGISTERED_HANGUL_TOKENS].filter((r) =>
+      hTokens.some(
+        (t) => t === r || (t.startsWith(r) && PARTICLE_SUFFIXES.some((p) => t === r + p)),
+      ),
+    ),
+    // 한국 고유명사도 후보다 — 근거 없는 회사명을 중간에 끼워 넣는 우회
+    // 차단 (Codex 리뷰 15차 P1).
+    ...[...NATIVE_KOREAN_NAMES].filter((n) => hangulNameAppears(text, n)),
+    // 혼합 토큰 전체("슈퍼챗GPT")도 후보다 — 내부 라틴만으로는 전체 이름의
+    // 추적성을 보장할 수 없다 (Codex 리뷰 21차 P1).
+    ...text
+      .split(/[\s,·"“”'‘’()[\]「」]+/u)
+      .map((t) => t.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""))
+      // 숫자로 시작하는 혼합 토큰("16GB로")은 측정 표기라 이름 후보가
+      // 아니다 (Codex 리뷰 22차 P1). 숫자가 뒤에 붙은 이름("슈퍼GPT-5")은
+      // 후보로 남긴다 (Codex 리뷰 23차 P1).
+      // 토큰 전체가 숫자+측정 단위(+조사)인 경우("16GB로"·"16GB에서")만
+      // 제외한다 — 단위 뒤에 이름이 붙은 토큰("24시간AI"·"16GB봇")은
+      // 후보로 남긴다 (Codex 리뷰 24~26차 P1/P2).
+      .filter(
+        (t) =>
+          /[가-힣]/.test(t) && /[A-Za-z]/.test(t) && !MEASURE_TOKEN_RE.test(t),
+      )
+      .map((t) => stripParticle(t))
+      // 조사 제거 후 순수 라틴 약어("AI를"→"AI")는 이름 후보가 아니다
+      // (Codex 리뷰 27차 P2).
+      .filter(
+        (t) =>
+          !/^[A-Za-z]+$/.test(t) ||
+          (!GENERIC_LATIN_WORDS.has(t.toLowerCase()) && !LATIN_UNITS.has(t.toLowerCase())),
+      ),
+    ...MIXED_REGISTERED_FORMS.filter((f) => mixedFormAppears(text, f)),
+    ...(text.matchAll(/[A-Za-z][A-Za-z0-9.-]{1,}/g) ?? [])
+      // 후행 구두점을 먼저 제거한 길이로 겹침을 판정한다 ("챗GPT."의 "GPT.")
+      // (Codex 리뷰 11차 P2).
+      .map((m) => ({ word: m[0].replace(/[.-]+$/, ""), index: m.index }))
+      // 수치에 붙은 단위("10ms"·"16GB"·"2.5MW")는 이름이 아니다 (Codex 9차 P1).
+      .filter((c) => !(c.index > 0 && /[\d.]/.test(text[c.index - 1])))
+      // 혼합 등록형 내부의 라틴 부분("챗GPT" 속 "GPT")은 독립 후보가 아니다
+      // — 단, 유효 등장 구간 안에서만 제외한다. "슈퍼챗GPT"처럼 경계가
+      // 무효한 등장은 제외 근거가 되지 않는다 (Codex 리뷰 10·20차 P1).
+      .filter((c) => {
+        const end = c.index + c.word.length;
+        return !MIXED_REGISTERED_FORMS.some((f) =>
+          mixedFormOccurrences(text, f).some(
+            (idx) => c.index >= idx && end <= idx + f.length,
+          ),
+        );
+      })
+      .map((c) => c.word)
+      .filter(
+        (w) =>
+          w.length >= 2 &&
+          !GENERIC_LATIN_WORDS.has(w.toLowerCase()) &&
+          !LATIN_UNITS.has(w.toLowerCase()),
+      ),
+  ];
+}
+
+const LATIN_UNITS = new Set([
+  "ms", "gb", "mb", "tb", "kb", "mw", "kw", "ghz", "mhz", "hz", "mm", "cm", "km", "kg", "fps", "rpm",
+]);
+
+/** 한국 고유명사 — 외국 이름의 음역이 아니라 원래 한글로 쓰는 이름이라
+ *  잠금 대상이 아니다 (삼성전자·카카오 등). 단, 무조건 면제가 아니라 대응
+ *  라틴명이 원문·카드에 있을 때만 인정한다 — 기사에 없는 회사로 주체를
+ *  바꾸는 날조까지 면제하지 않기 위해서다 (Codex 리뷰 13차 P1). */
+const NATIVE_LATIN_MAP: Record<string, string[]> = {
+  삼성전자: ["Samsung"],
+  삼성: ["Samsung"],
+  현대차: ["Hyundai"],
+  현대자동차: ["Hyundai"],
+  기아: ["Kia"],
+  카카오: ["Kakao"],
+  네이버: ["Naver"],
+  쿠팡: ["Coupang"],
+  토스: ["Toss"],
+  라인: ["Line"],
+  한화: ["Hanwha"],
+  롯데: ["Lotte"],
+  신세계: ["Shinsegae"],
+  SK하이닉스: ["SK hynix", "SK Hynix"],
+  포스코: ["POSCO"],
+  넷마블: ["Netmarble"],
+  넥슨: ["Nexon"],
+  크래프톤: ["Krafton"],
+  하이브: ["HYBE"],
+  배달의민족: ["Baemin", "Woowa"],
+  당근: ["Danggeun", "Karrot"],
+  야놀자: ["Yanolja"],
+  무신사: ["Musinsa"],
+  컬리: ["Kurly"],
+};
+const NATIVE_KOREAN_NAMES = new Set(Object.keys(NATIVE_LATIN_MAP));
+/** 대응 라틴명이 일반어라 원문 등장만으로는 근거가 안 되는 이름. */
+const NATIVE_ENTITY_ONLY = new Set(["라인", "토스"]);
+
+/** 인용부호 속 단일 토큰 한글 이름 — 데스크가 새 이름을 소개하는 표면이라
+ *  후보 추출·선두 검사에서 빠져도 여기서 잡는다 (Codex 리뷰 14차 P1). */
+function quotedHangulNames(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/'([^'\s]{2,30})'|"([^"\s]{2,30})"|「([^」\s]{2,30})」/g)) {
+    const inner = m[1] ?? m[2] ?? m[3] ?? "";
+    if (/[가-힣]/.test(inner)) out.push(inner);
+  }
+  return out;
+}
+/** 제목 선두 주체로 흔한 기관·지명·통칭 — 미등록 음역 검사에서 제외. */
+const COMMON_SUBJECTS = new Set([
+  "정부", "국회", "법원", "검찰", "경찰", "당국", "연구진", "업계", "시장",
+  "국내", "해외", "전국", "서울", "부산", "대구", "인천", "광주", "대전",
+  "울산", "미국", "중국", "일본", "유럽", "금융위", "금감원", "한은", "과기부",
+  "오픈소스", "클라우드", "인공지능", "반도체", "전기차", "배터리", "로봇",
+  "테크기업", "빅테크", "스타트업", "플랫폼사", "게임사",
+]);
+
+/** 제목 선두 주체 토큰들 — 데스크 제목은 "주체, 행위" 구조라 첫 쉼표 앞이
+ *  주체 이름이다. 병렬 주체("구글·퍼플렉시티")는 전수 반환한다
+ *  (Codex 리뷰 13차 P1). 조사 결합형은 원형 그대로 반환하고, 조사 제거는
+ *  검사 쪽에서 원형 추적이 실패할 때만 시도한다 (이름 끝음절 오제거 방지
+ *  — Codex 리뷰 16차 P2). */
+function titleHeadSubjects(title: string): string[] {
+  const head = (title.split(",")[0] ?? "").trim();
+  return head
+    .split("·")
+    .map((part) => (part.trim().split(/\s+/)[0] ?? "").trim())
+    .filter(Boolean);
+}
+
+function stripParticle(tok: string): string {
+  const suffixes = [...PARTICLE_SUFFIXES].sort((a, b) => b.length - a.length);
+  for (const p of suffixes) {
+    if (tok.length - p.length >= 2 && tok.endsWith(p)) return tok.slice(0, -p.length);
+  }
+  return tok;
+}
+
+/** 추적성 판정기: 표기가 이 기사의 카드·원문·등장한 등록 표기로 설명되는가.
+ *  라틴 단어는 단어 경계로 본다 ("metadata"가 "Meta"를 추적 가능하게
+ *  만들지 않는다 — Codex 3차 P1). */
+function makeTraceChecker(
+  card: FactCard,
+  entry: { title: string; summary: string },
+): (name: string) => boolean {
+  const sourceText = `${entry.title} ${entry.summary}`;
+  // 추적 근거는 원문 + 카드의 원어 이름(entities)뿐이다 — 모델이 쓴 한국어
+  // change를 근거로 삼으면 미등록 음역이 스스로를 정당화한다 (Codex 13차 P1).
+  const cardText = card.entities.join(" ");
+  const present = presentRegisteredPairs(card, entry);
+  const presentHangulTokens = new Set([
+    ...present.flatMap(([, hangul]) => hangulTokens(hangul)),
+  ]);
+  const allowedFull = new Set<string>([
+    ...card.entities.map(nameNorm),
+    ...present.flatMap(([latin, hangul]) => [nameNorm(latin), nameNorm(hangul)]),
+  ]);
+  return (name: string): boolean => {
+    // 한국 고유명사는 대응 라틴명이 원문·카드에 있을 때만 추적 인정.
+    if (NATIVE_KOREAN_NAMES.has(name)) {
+      if (hangulNameAppears(sourceText, name)) return true;
+      // 일반어와 겹치는 이름(라인↔line, 토스↔toss)은 원문의 일반 단어
+      // 등장으로 인정하지 않는다 — entities 근거만 인정 (Codex 14차 P1).
+      if (NATIVE_ENTITY_ONLY.has(name)) {
+        return (NATIVE_LATIN_MAP[name] ?? []).some((latin) =>
+          card.entities.some((e) => latinAppears(e, latin)),
+        );
+      }
+      return (NATIVE_LATIN_MAP[name] ?? []).some(
+        (latin) => latinAppears(sourceText, latin) || card.entities.some((e) => latinAppears(e, latin)),
+      );
+    }
+    if (allowedFull.has(nameNorm(name))) return true;
+    // 혼합형 이름(오픈AI 등)은 전체 표기로만 추적한다 — "오픈" 부분 일치가
+    // "오픈소스"에 걸려 통과하는 우회 차단 (Codex 리뷰 8차 P1).
+    if (/[가-힣]/.test(name) && /[A-Za-z0-9]/.test(name)) {
+      return hangulNameAppears(sourceText, name) || mixedFormAppears(cardText, name);
+    }
+    // 원문 그대로의 표기는 한글 이름만 인정한다 — 라틴 이름의 부분 일치
+    // ("Metadata" 속 "Meta")가 경계 검사를 우회하지 않게 (Codex 4차 P1).
+    if (!/[A-Za-z]/.test(name) && hangulNameAppears(sourceText, name)) return true;
+    const hTokens = hangulTokens(name);
+    const latinWords = (name.match(/[A-Za-z][A-Za-z0-9.-]*/g) ?? []).filter(
+      (w) => w.length >= 2 && !GENERIC_LATIN_WORDS.has(w.toLowerCase()),
+    );
+    const hangulOk = hTokens.every(
+      (t) => presentHangulTokens.has(t) || hangulNameAppears(sourceText, t),
+    );
+    // 라틴 이름인데 검사할 단어가 전부 걸러지면(일반 약어뿐) 빈 every()가
+    // 참이 되는 우회를 막는다 — 이름 전체의 경계 등장으로 판정한다
+    // (Codex 리뷰 6차 P1: "HP" 사례).
+    if (/[A-Za-z]/.test(name) && latinWords.length === 0) {
+      return hangulOk && (latinAppears(sourceText, name) || latinAppears(cardText, name));
+    }
+    const latinOk = latinWords.every(
+      (w) =>
+        latinAppears(sourceText, w) ||
+        latinAppears(cardText, w) ||
+        present.some(([latin]) => latin.toLowerCase() === w.toLowerCase()),
+    );
+    return hangulOk && latinOk;
+  };
+}
+
+/**
+ * usedNames 추적 검사 (엔티티 잠금 채널 2).
+ * - 선언 자체가 없으면 form 위반 (재작성으로 선언을 강제한다 — Codex 리뷰 P1).
+ * - 제목에 등록 표기·라틴 고유명사가 있는데 선언에서 빠졌으면 form 위반 (완전성).
+ * - 선언된 표기는 이 기사의 카드·원문·등장한 등록 표기로만 추적 가능해야 한다.
+ */
+function checkUsedNames(
+  usedNames: unknown,
+  title: string,
+  card: FactCard,
+  entry: { title: string; summary: string },
+): CardViolation[] {
+  const violations: CardViolation[] = [];
+  // 선언 누락이어도 제목 후보의 완전성·추적성 검사는 계속한다 — 누락을
+  // 우회로로 만들지 않는다 (Codex 리뷰 4차 P1).
+  if (!Array.isArray(usedNames)) {
+    violations.push({
+      kind: "form",
+      detail: "usedNames가 누락됐다 — 제목에 쓴 고유명사를 usedNames에 표기 그대로 전부 선언할 것",
+    });
+  }
+  const declared = (Array.isArray(usedNames) ? usedNames : []).filter(
+    (x): x is string => typeof x === "string" && x.trim().length > 0,
+  );
+  // 완전성은 이름 구성요소(스크립트 단위 토큰)의 정확 일치로 본다 —
+  // "GPT" 선언이 "FakeGPT"를 선언한 것으로 둔갑하는 부분일치 우회 방지
+  // (Codex 리뷰 2차 P1).
+  const nameComponents = (s: string): string[] =>
+    (s.match(/[A-Za-z0-9]+|[가-힣]+/g) ?? []).map(nameNorm);
+  const declaredComponents = new Set(declared.flatMap(nameComponents));
+  const titleComponents = new Set(nameComponents(title));
+  const titleNames = candidateNames(title);
+  const isTraceable = makeTraceChecker(card, entry);
+  const entityFlagged = new Set<string>();
+  for (const t of titleNames) {
+    if (!nameComponents(t).every((c) => declaredComponents.has(c))) {
+      violations.push({
+        kind: "form",
+        detail: `제목의 고유명사 "${t}"이(가) usedNames 선언에서 빠졌다 — 쓴 표기는 전부 선언할 것`,
+      });
+    }
+    // 추적 검사는 선언 충족과 무관하게 모든 후보에 적용한다 — 선언을
+    // 구성요소로 쪼개 등록하면 후보 자체의 검사를 건너뛰는 우회 차단
+    // (Codex 리뷰 9차 P1: ["오픈","AI"] 분리 선언 사례).
+    if (!isTraceable(t)) {
+      entityFlagged.add(nameNorm(t));
+      violations.push({
+        kind: "entity",
+        detail: `제목의 고유명사 "${t}"이(가) 이 기사의 사실 카드·등록 표기·원문 어디에도 없다 — 없는 명칭 생성 금지`,
+      });
+    }
+  }
+  // 역방향: 선언된 이름의 구성요소가 제목에 실제로 있어야 한다.
+  for (const name of declared) {
+    if (!nameComponents(name).every((c) => titleComponents.has(c))) {
+      violations.push({
+        kind: "form",
+        detail: `usedNames의 "${name}"이(가) 제목에 없다 — 제목에 쓴 고유명사만 선언할 것`,
+      });
+    }
+  }
+  for (const name of declared) {
+    if (entityFlagged.has(nameNorm(name))) continue;
+    if (isTraceable(name)) continue;
+    violations.push({
+      kind: "entity",
+      detail: `제목의 고유명사 "${name}"이(가) 이 기사의 사실 카드·등록 표기·원문 어디에도 없다 — 등록 표기가 없으면 라틴 표기를 유지할 것`,
+    });
+  }
+  return violations;
+}
+
+// ============================================================================
+// Phase 1: 원문 대조 검증 (Pass 2 산출물 vs 사실 카드·원문)
+// 없는 명칭 생성(entity) · 수치 변경(number) · 의혹을 사실로 단정(status)을 잡는다.
+// 근거는 원문(entry)뿐이다 — Pass 1이 만든 numbers/change는 모델 산출물이라
+// 그 자체를 허용 근거로 쓰면 검증이 순환한다 (Codex 리뷰 P1). evidence는
+// 원문에 그대로 있는 인용일 때만 근거로 인정한다.
+// ============================================================================
+
+export type CardViolation = { kind: "entity" | "number" | "status" | "form"; detail: string };
+
+type NumFact = { value: number; unit: string; raw: string };
+
+const NUM_SCALE: Record<string, number> = {
+  천: 1e3,
+  만: 1e4,
+  억: 1e8,
+  조: 1e12,
+  thousand: 1e3,
+  million: 1e6,
+  billion: 1e9,
+  trillion: 1e12,
+  k: 1e3,
+  m: 1e6,
+  b: 1e9,
+};
+const NUM_UNIT_EN: Record<string, string> = {
+  dollar: "달러",
+  dollars: "달러",
+  usd: "달러",
+  percent: "%",
+  x: "배",
+  seconds: "s",
+  second: "s",
+  secs: "s",
+  sec: "s",
+  minutes: "min",
+  minute: "min",
+  mins: "min",
+  min: "min",
+  hours: "h",
+  hour: "h",
+  hrs: "h",
+  hr: "h",
+};
+/** 단일 패스 수치 추출. 숫자 중간에서 시작하는 매치를 lookbehind로 막고
+ *  ("23x"가 "2"+"3배"로 분해되지 않게), $ 접두사와 배율을 한 번에 소비한다
+ *  ("$2 million" = 200만 달러 — Codex 리뷰 5차 P1). 배율은 연속 합성
+ *  ("2천만"·"5천억")과 영문 축약(""$3M"·"70B")까지 값으로 정규화한다
+ *  (Codex 리뷰 6차 P1/P2). */
+/** 측정 단위(ms·GB·MW·시간 단어)는 배율보다 먼저 식별한다 — "10ms"의 m을
+ *  million으로 먹는 오추출 방지 (Codex 리뷰 11차 P1). */
+const NUM_ANY =
+  /(?<![\d,.])([-−])?(\$)?(\d[\d,]*(?:\.\d+)?)(?:\s*(ms|gb|mb|tb|kb|mw|kw|ghz|mhz|khz|hz|mm|cm|km|kg|fps|rpm|px|seconds?|secs?|minutes?|mins?|hours?|hrs?)|((?:\s*(?:만|억|조|천|thousand|million|billion|trillion|[KMBkmb]))*)\s*(달러|원|유로|%|배|토큰|개|건|명|회|종|단계|위|점|밀리초|시간|분|초|dollars?|usd|percent|x|s|h|w|g|b)?)(?![A-Za-z0-9])/gi;
+const NUM_SCALE_TOKEN = /(만|억|조|천|thousand|million|billion|trillion|[KMBkmb])/gi;
+const NUM_UNIT_KO: Record<string, string> = {
+  밀리초: "ms",
+  시간: "h",
+  분: "min",
+  초: "s",
+};
+const NUM_UNIT_PLURAL: Record<string, string> = {
+  tokens: "토큰",
+  token: "토큰",
+  users: "명",
+  user: "명",
+  requests: "건",
+  request: "건",
+  points: "점",
+  point: "점",
+  items: "개",
+  item: "개",
+  views: "회",
+  view: "회",
+  downloads: "건",
+  download: "건",
+  subscribers: "명",
+  subscriber: "명",
+  members: "명",
+  member: "명",
+  orders: "건",
+  order: "건",
+};
+/** 한국어 계수사는 의미 단위가 아니라 문법적 조수사라 단위 대조에서 면제. */
+const COUNTER_UNITS = new Set(["개", "건", "명", "회", "종", "위", "단계"]);
+const CURRENCY_UNITS = new Set(["달러", "원", "유로"]);
+/** 후행 단위 포착에서 제외할 영문 기능어. */
+const UNIT_FUNCTION_WORDS = new Set([
+  "in", "on", "at", "of", "to", "for", "per", "and", "or", "the", "an",
+  "by", "with", "from", "than", "more", "new", "total", "about", "over",
+  "under", "after", "before", "during", "via", "is", "are", "was", "were",
+  "has", "had", "will", "can", "its", "this", "that", "each",
+]);
+
+/** 수치 사실을 값+단위로 정규화한다 — 한글 배율(만/억/조/천)과 영문 배율
+ *  (thousand/million/billion·K/M/B)·통화(dollars→달러)·배수(x→배)를 같은
+ *  값 공간에서 대조해 "2 million dollars"→"2억 원" 같은 변경도 잡는다
+ *  (Codex 리뷰 4차 P1). */
+function extractNumFacts(s: string): NumFact[] {
+  const facts: NumFact[] = [];
+  for (const m of s.matchAll(NUM_ANY)) {
+    let mult = 1;
+    let unit = "";
+    if (m[4]) {
+      // 측정 단위 우선 경로 — 배율을 소비하지 않는다.
+      const raw = m[4].toLowerCase();
+      unit = NUM_UNIT_EN[raw] ?? raw;
+    } else {
+      for (const t of (m[5] ?? "").matchAll(NUM_SCALE_TOKEN)) {
+        mult *= NUM_SCALE[t[1].toLowerCase()] ?? 1;
+      }
+      unit = m[6] ?? "";
+      if (unit && NUM_UNIT_KO[unit]) unit = NUM_UNIT_KO[unit];
+      else if (unit && /^[A-Za-z]+$/.test(unit)) {
+        unit = NUM_UNIT_EN[unit.toLowerCase()] ?? unit.toLowerCase();
+      }
+      // 목록에 없는 영문 단위어("2 million tokens"·"1 token")도 단위로
+      // 포착한다 — 단위 미추출을 이용해 금액으로 바꿔치기하는 날조 차단
+      // (Codex 리뷰 17·18차 P1/P2).
+      if (!unit && !m[2]) {
+        const tail = s.slice(m.index + m[0].length).match(/^\s+([A-Za-z]{3,}s?)\b/);
+        if (tail) {
+          const w = tail[1].toLowerCase();
+          if (NUM_UNIT_PLURAL[w]) unit = NUM_UNIT_PLURAL[w];
+          else if (w.endsWith("s")) unit = NUM_UNIT_PLURAL[w.slice(0, -1)] ?? w.slice(0, -1);
+          // 미등록 단수 단위("1 credit")는 소문자 시작일 때만 원형 그대로
+          // 포착한다 — 대문자 시작은 이름일 수 있어 제외 (Codex 21차 P1).
+          else if (/^[a-z]/.test(tail[1]) && !UNIT_FUNCTION_WORDS.has(w)) unit = w;
+        }
+      }
+    }
+    if (!unit && m[2]) unit = "달러";
+    let value = Number((parseFloat(m[3].replace(/,/g, "")) * mult).toPrecision(12));
+    // 부호는 단어에 붙은 하이픈("GPT-5")과 구분해 값에 반영한다 — 부호 앞이
+    // 영숫자가 아니면(공백·시작·괄호) 실제 음수다 (Codex 리뷰 12차 P2).
+    if (m[1] && (m.index === 0 || !/[A-Za-z0-9]/.test(s[m.index - 1]))) value = -value;
+    if (Number.isFinite(value)) facts.push({ value, unit, raw: m[0].trim() });
+  }
+  return facts;
+}
+
+/** 문장 분리: 마침표 뒤 공백이 없어도 나누되, 마침표 양쪽이 모두 숫자인
+ *  소수점(2.5)만 경계에서 제외한다 (Codex 리뷰 10·11차 P1). */
+function splitSentences(text: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    cur += ch;
+    if (ch === ".") {
+      const prev = text[i - 1] ?? "";
+      const next = text[i + 1] ?? "";
+      if (/\d/.test(prev) && /\d/.test(next)) continue;
+      out.push(cur);
+      cur = "";
+      while (text[i + 1] === " ") i++;
+    }
+  }
+  if (cur.trim()) out.push(cur);
+  return out.map((s) => s.trim()).filter(Boolean);
+}
+const STATUS_MARKER = /의혹|주장|논란|혐의|추정|제보|우려|가능성|전망|보고(?!서)|알려져/;
+const ASSERTIVE_HINT = /확인됐|확인되었|확인했다|확인한다|확인됨|확인\.|확정됐|확정되었|확정했다|확정한다|확정됨|확정\.|입증됐|입증되었|입증했다|입증됨|입증\.|드러났다|밝혀졌다|사실로|결론났다|결론(?:을|를)?\s?내렸|결론이 났|결론에 도달했|판명됐다|판명되었다|확인된 것으로|확정된 것으로|입증된 것으로/;
+/** 부정·미확인 문맥 — 단정 신호가 있어도 의혹 보존 문장이다 (Codex 15차 P2).
+ *  부인은 종결형만 인정한다 — 관계절의 과거 부인("부인했던 …이 사실로
+ *  확인됐다")은 현재 단정의 부정이 아니다 (Codex 리뷰 22차 P1). */
+const NEGATED_ASSERT = /(확인|확정|입증)되지|확인되지 않|사실이 아니|아닌 것으로|부인했(다|음|다고)|부인한다(?=[.,\s]|$)|미확인|확인된 바 없/;
+/** 제목 끝의 명사형 단정 ("…유출 확정"·"…내부 조사로 확인") — 문장 종결이
+ *  없어 ASSERTIVE_HINT로 못 잡는다 (Codex 리뷰 3·31차). */
+const TITLE_ASSERTIVE = /(확정|입증|확인)\s*$/;
+
+export function verifyAgainstCard(
+  title: string,
+  takeaway: string,
+  summary: string,
+  card: FactCard,
+  entry: { title: string; summary: string },
+  usedNames?: unknown,
+): CardViolation[] {
+  const violations: CardViolation[] = [];
+  const sourceText = `${entry.title} ${entry.summary}`;
+  // 1) 엔티티 잠금 — 근접 오형(채널 1, 제목·시사점·요약) + usedNames 추적(채널 2).
+  for (const token of findNearMissEntities(`${title} ${takeaway} ${summary}`, sourceText)) {
+    violations.push({
+      kind: "entity",
+      detail: `"${token}"은(는) 등록 표기의 오형으로 보인다 — 등록 표기를 정확히 쓰거나 라틴 표기를 유지할 것`,
+    });
+  }
+  violations.push(...checkUsedNames(usedNames, title, card, entry));
+  // 1a) 제목 선두 주체 — 등록에 없는 한글 음역(퍼플렉시티 등)은 후보 추출에
+  // 걸리지 않으므로, "주체, 행위" 구조의 선두 토큰을 별도로 검사한다
+  // (Codex 리뷰 12차 P1). 한국 고유명사·기관 통칭은 면제.
+  {
+    const trace = makeTraceChecker(card, entry);
+    // 선두 검사는 "주체, 행위" 쉼표 구조에서만 적용한다 — 쉼표 없는 제목의
+    // 첫 단어를 고유명사로 단정하면 정상 제목을 오판한다 (Codex 15차 P2).
+    const headSegment = (title.split(",")[0] ?? "").trim();
+    const headTokenCount = headSegment.split(/[·\s]+/).filter(Boolean).length;
+    const subjects =
+      title.includes(",") && headTokenCount <= 3 ? titleHeadSubjects(title) : [];
+    for (const rawSubject of subjects) {
+      const subject = stripParticle(rawSubject);
+      if (
+        rawSubject.length >= 2 &&
+        /[가-힣]/.test(rawSubject) &&
+        !COMMON_SUBJECTS.has(rawSubject) &&
+        !COMMON_SUBJECTS.has(subject) &&
+        !violations.some(
+          (v) =>
+            v.kind === "entity" &&
+            (v.detail.includes(`"${rawSubject}"`) || v.detail.includes(`"${subject}"`)),
+        ) &&
+        !trace(rawSubject) &&
+        !trace(subject)
+      ) {
+        violations.push({
+          kind: "entity",
+          detail: `제목의 주체 "${subject}"이(가) 등록 표기에 없는 한글 표기다 — 등록 표기가 없으면 라틴 표기를 유지할 것`,
+        });
+      }
+    }
+  }
+  // 1b) 본문 추적성 — 제목뿐 아니라 시사점·요약에 생성된 명칭도 잡는다
+  // (Codex 리뷰 7차 P1). 제목에서 이미 검사한 이름은 건너뛴다.
+  {
+    const trace = makeTraceChecker(card, entry);
+    const titleNameNorms = new Set(candidateNames(title).map(nameNorm));
+    const bodyNames = candidateNames(`${takeaway} ${summary}`).filter(
+      (n) => !titleNameNorms.has(nameNorm(n)),
+    );
+    for (const n of bodyNames) {
+      if (!trace(n)) {
+        violations.push({
+          kind: "entity",
+          detail: `본문의 고유명사 "${n}"이(가) 이 기사의 사실 카드·등록 표기·원문 어디에도 없다 — 없는 명칭 생성 금지`,
+        });
+      }
+    }
+    // 1c) 인용부호 속 한글 이름 — 제목·본문 어디에 있든 추적 검사한다.
+    const quoted = quotedHangulNames(`${title} ${takeaway} ${summary}`);
+    for (const n of quoted) {
+      if (
+        !violations.some((v) => v.kind === "entity" && v.detail.includes(`"${n}"`)) &&
+        !trace(n)
+      ) {
+        violations.push({
+          kind: "entity",
+          detail: `인용 표기된 고유명사 "${n}"이(가) 이 기사의 사실 카드·등록 표기·원문 어디에도 없다 — 없는 명칭 생성 금지`,
+        });
+      }
+    }
+  }
+  // 2) 수치 대조 — 숫자 자체의 생성 + 단위 변경을 본다.
+  // 단위 쌍은 "같은 숫자가 원문에서 다른 단위와 붙어 있을 때만" 위반으로 한다:
+  // 영문 원문의 "2 hours"를 "2시간"으로 옮기는 정상 번역까지 잡으면 오탐이다.
+  const evidenceOk =
+    card.evidence.trim().length >= 4 && sourceText.includes(card.evidence.trim());
+  const ground = evidenceOk ? `${sourceText} ${card.evidence}` : sourceText;
+  const groundFacts = extractNumFacts(ground);
+  const groundValues = new Set(groundFacts.map((f) => f.value));
+  const groundUnitsByValue = new Map<number, Set<string>>();
+  for (const f of groundFacts) {
+    if (!f.unit) continue;
+    if (!groundUnitsByValue.has(f.value)) groundUnitsByValue.set(f.value, new Set());
+    groundUnitsByValue.get(f.value)!.add(f.unit);
+  }
+  const outputText = `${title} ${takeaway} ${summary}`;
+  const reportedValues = new Set<number>();
+  for (const f of extractNumFacts(outputText)) {
+    if (reportedValues.has(f.value)) continue;
+    if (!groundValues.has(f.value)) {
+      reportedValues.add(f.value);
+      // 값 자체가 원문에 없다 — 생성·변경·배율 탈락(2만→2)이 모두 여기서 잡힌다.
+      violations.push({
+        kind: "number",
+        detail: `원문에 없는 수치 "${f.raw}" — 수치 생성·변경·배율 탈락 금지`,
+      });
+      continue;
+    }
+    // 값은 같지만 단위가 원문의 그 값에 붙은 단위와 다르면 통화·단위 변경이다.
+    // 원문에 단위가 없을 때(영문 "2 hours"→"2시간")는 단위를 문제 삼지 않고,
+    // 한국어 계수사(개·건·명 등)는 원문 단위가 통화가 아닐 때만 면제한다 —
+    // 금액을 인원수로 바꾸는 변경까지 면제하지 않는다 (Codex 리뷰 21차 P1).
+    const groundUnits = groundUnitsByValue.get(f.value);
+    const counterSwap = COUNTER_UNITS.has(f.unit);
+    const groundHasCurrency = groundUnits
+      ? [...groundUnits].some((u) => CURRENCY_UNITS.has(u))
+      : false;
+    if (
+      f.unit &&
+      (!counterSwap || groundHasCurrency) &&
+      groundUnits &&
+      groundUnits.size > 0 &&
+      !groundUnits.has(f.unit)
+    ) {
+      reportedValues.add(f.value);
+      violations.push({
+        kind: "number",
+        detail: `수치 "${f.raw}"의 단위가 원문(${[...groundUnits].join("·")})과 다르다 — 단위 변경 금지`,
+      });
+    }
+  }
+  // 3) 상태 대조 — 단위(제목·사실 문장·요약 문장)별로 본다. 표지가 다른
+  // 문장에 있어도 단정형 문장은 면제되지 않는다 ("유출 의혹이 사실로
+  // 확인됐다"처럼 한 문장 안에 표지와 단정이 같이 있어도 위반 — Codex 2차).
+  if (card.status !== "confirmed") {
+    const fact = factPart(takeaway);
+    // 상태 보존 인정: 의혹 표지 또는 명시적 미확인·부정 표현 (Codex 16차 P2).
+    // 절 단위로 보되, 단위 전체 판정(preservedAll)은 모든 절이 보존될 때만
+    // 인정한다 — 한 절의 미확인이 다른 절의 단정을 덮지 않게 (Codex 17차 P1).
+    const clausesOf = (t: string) =>
+      t.split(/(?<=됐고|됐으며|했고|했으며|됐지만|했지만|않았고|않았으며|됐는데도|됐는데|했는데도|했는데|였는데도|였는데|되었는데도|되었는데|되었고|되었으며|되자마자|되자|하자|되니|하니|되면서|이며|이고|하고|하며|지만|으나|인데)|[,;]/u).filter((c) => c.trim());
+    // 부정 면제는 절 말미의 술어 부정만 인정한다 — 관계절 속 과거
+    // 부인·인용("부인했다고 알려진")은 상태 보존 근거가 아니다
+    // (Codex 리뷰 22~24차 P1).
+    const tailNegated = (c: string) => {
+      const tail = c.trim().replace(/[."'”]+$/, "");
+      return /(확인|확정|입증)되지 않았다$|(확인|확정|입증)되지 않았고$|(확인|확정|입증)되지 않았으며$|(확인|확정|입증)되지 않아$|(확인|확정|입증)되지 않는다$|사실이 아니다$|아닌 것으로 (밝혀졌다|드러났다|전해졌다)$|부인했다$|부인했음$|부인한다$|부인한다고 (전했다|밝혔다)$|미확인이다$|미확인$|확인된 바 없(?:다|음|는)$/.test(tail);
+    };
+    const clausePreserved = (c: string) => STATUS_MARKER.test(c) || tailNegated(c);
+    // 판정은 문장→절 순서로 쪼갠 뒤 한다 — 여러 문장 전체를 한 절로 보면
+    // 말미 앵커가 마지막 문장에만 걸려 앞 문장의 부정이 사라진다.
+    const sentenceClauses = (t: string) => splitSentences(t).flatMap((s) => clausesOf(s));
+    const preservedAny = (t: string) => sentenceClauses(t).some(clausePreserved);
+    const preservedAll = (t: string) => sentenceClauses(t).every(clausePreserved);
+    if (!preservedAny(title) && !preservedAny(fact)) {
+      violations.push({
+        kind: "status",
+        detail: `사실 상태가 ${card.status}인데 의혹·주장 표지 없이 단정함 — "~의혹/주장/논란"으로 쓸 것`,
+      });
+    }
+    // 의혹(allegation)은 단위별 상태 보존을 강제한다 — 제목·사실부·요약 중
+    // 어느 하나라도 표지를 잃으면 그 단위가 사건을 사실로 단정하게 된다
+    // (Codex 리뷰 4차 P1). 주장(claim)은 업체 주장을 평서로 전하는 제목이
+    // 데스크 관행이라 합산 표지 + 단정 검출로 충분하다.
+    if (card.status === "allegation") {
+      // 제목·사실부는 절 단위 전부 보존, 요약은 단위 내 보존 + 첫 문장
+      // 절 단위 보존 (요약의 반응·배경 문장까지 표지를 강제하지 않는다).
+      // 제목의 선두 주체 구간(첫 쉼표 앞)은 사건 절이 아니라 제외한다 —
+      // 단, 구간의 모든 토큰이 이름·통칭으로 구성될 때만 주체 구간으로
+      // 인정한다. 사건 명사 목록에 의존하면 목록 밖 사건(파산·체포 등)이
+      // 우회하므로 구성을 본다 (Codex 리뷰 19~21차 P1).
+      const headSeg = (title.split(",")[0] ?? "").trim();
+      // 이름다움은 후보·카드 선언·통칭 집합으로만 판정한다 — 원문에 등장한
+      // 일반 명사(파산 등)를 추적 가능 여부로 인정하면 사건 단정이 주체
+      // 구간으로 둔갑한다 (Codex 리뷰 22차 P1).
+      const headNameSet = new Set(
+        [...candidateNames(headSeg), ...card.entities, ...card.hangulForms].map(nameNorm),
+      );
+      const headTokens = headSeg.split(/[·\s]+/).filter(Boolean);
+      const headIsSubjectZone =
+        title.includes(",") &&
+        headTokens.length > 0 &&
+        headTokens.length <= 3 &&
+        headTokens.every((tok) => {
+          const stripped = stripParticle(tok);
+          return (
+            /^[A-Za-z]/.test(tok) ||
+            COMMON_SUBJECTS.has(tok) ||
+            COMMON_SUBJECTS.has(stripped) ||
+            headNameSet.has(nameNorm(tok)) ||
+            headNameSet.has(nameNorm(stripped))
+          );
+        });
+      const titleEvent = headIsSubjectZone ? title.slice(title.indexOf(",") + 1) : title;
+      const units: Array<[string, string, boolean]> = [
+        ["제목", titleEvent, true],
+        ["시사점 사실부", fact, true],
+        ["요약", summary, false],
+      ];
+      for (const [label, text, strict] of units) {
+        if (text && !(strict ? preservedAll(text) : preservedAny(text))) {
+          violations.push({
+            kind: "status",
+            detail: `의혹 기사인데 ${label}에 의혹·주장 표지가 없다 — 단정으로 읽힌다. ${label}에도 표지를 유지할 것`,
+          });
+        }
+      }
+      // 요약은 첫 문장이 사건 요지다 — 표지가 뒤 문장에만 있으면 첫 문장의
+      // 단정이 그대로 게시된다 (Codex 리뷰 6차 P1).
+      const firstSentence = splitSentences(summary)[0] ?? "";
+      if (firstSentence && !preservedAll(firstSentence)) {
+        violations.push({
+          kind: "status",
+          detail: `의혹 기사인데 요약 첫 문장에 의혹·주장 표지가 없다 — 첫 문장부터 표지를 유지할 것`,
+        });
+      }
+    }
+    const units = [
+      title,
+      ...splitSentences(fact),
+      ...splitSentences(summary),
+    ];
+    for (const unit of units) {
+      if (!unit) continue;
+      // 부정 판정은 절 단위로 한다 — 문장 다른 절의 미확인 표현이 단정절을
+      // 면제하지 않는다 (Codex 리뷰 16차 P1).
+      const clauses = clausesOf(unit);
+      // 단정 판정은 부정 구간을 먼저 제거하고 본다 — "사실로 확인되지
+      // 않았다"의 단정은 부정 구간 안에 있지만, "사실로 확인된 상황에서
+      // 피해 규모는 확인되지 않았다"의 단정은 구간 밖에 남는다. 말미
+      // 패턴 일치가 아니라 단정 자체가 부정되는지를 본다 (Codex 26~28차).
+      const NEG_SPAN = /(사실로\s+)?(확인|확정|입증)되지\s*않(?:았다|았고|았으며|았지만|는다|아|은|고|으며|지만)|(사실로\s+)?확인된 바 없(?:다|음|는)|(?:사실이\s+)?아닌 것으로 (?:밝혀졌다|드러났다|전해졌다)|미확인/g;
+      const DENIAL_TAIL = /(부인했다|부인했음|부인한다|부인한다고 (?:전했다|밝혔다))\s*$/;
+      const QUOTED_DENIAL = /(?:다는|라는|다고|라고)\s*(?:주장|의혹|보도|사실|혐의|내용|소문|루머)(?:을|를|은|에 대해|에 대해서)?\s*부인(?:했다|했음|한다|한다고 (?:전했다|밝혔다))?/;
+      const badClause = clauses.some((c) => {
+        let stripped = c.replace(NEG_SPAN, " ");
+        // "…확인됐다는 주장을 부인했다" — 부인에 귀속된 인용 구간만
+        // 검사에서 제외하고, 구간 앞의 독립 서술은 계속 검사한다
+        // ("확인된 뒤 회사는 유출됐다는 주장을 부인했다"의 앞부분 단정은
+        // 부인 대상이 아니다). "책임을 부인" 같은 다른 대상 부인은
+        // 인용형이 없어 제외되지 않는다 (Codex 리뷰 26·34~36차).
+        if (DENIAL_TAIL.test(c.trim().replace(/[."'”]+$/, ""))) {
+          const m = QUOTED_DENIAL.exec(stripped);
+          if (m) {
+            const before = stripped.slice(0, m.index);
+            // 인용 구간의 시작 = 마지막 경계(뒤·후·쉼표) 또는 인용 직전의
+            // 마지막 주어 토큰 시작. 경계가 없으면 절 전체가 인용 구간인
+            // 경우뿐이므로, 독립 단정이 앞에 있으면 주어 경계가 잡는다
+            // ("확인됐는데 회사는 …주장을 부인했다") (Codex 리뷰 37차 P1).
+            let cut = Math.max(
+              before.lastIndexOf(" 뒤 "),
+              before.lastIndexOf(" 후 "),
+              before.lastIndexOf(", "),
+              before.lastIndexOf(" 그리고 "),
+              before.lastIndexOf(" 그러나 "),
+            );
+            for (const sm of before.matchAll(/[가-힣A-Za-z0-9]+(?:은|는|이|가)\s/g)) {
+              if (sm.index > cut) cut = sm.index;
+            }
+            const kept = (cut >= 0 ? before.slice(0, cut) : "") + stripped.slice(m.index + m[0].length);
+            // 안전 불변식: ① 구간 앞에 단정이 남아 있거나 ② 구간 내부
+            // 인용 직전에 연결 어미로 끝나는 선행 절이 있으면("…확인됐기에
+            // 해킹됐다는 주장") 제거를 취소한다 — 인용 범위를 확실히
+            // 식별하지 못하면 앞선 단정 구간을 보존 (Codex 리뷰 40·41차).
+            const beforeSeg = cut >= 0 ? before.slice(0, cut) : "";
+            const segPre = stripped.slice(cut >= 0 ? cut : 0, m.index);
+            // 구간 내부 선행 단정 검출: 인용 명제는 인용 표지에 붙은
+            // 마지막 술어 토큰뿐이다(직전이 정확히 "사실로"일 때만 함께
+            // 포함 — "사실로 확인됐"). 그 창 밖에 단정 신호가 있으면
+            // ("확인됐기에 해킹됐다는 주장") 선행 독립 단정이 구간에
+            // 섞인 것이므로 제거를 취소한다 (Codex 리뷰 41~44차 P1).
+            const segTokensWithPos: { text: string; index: number }[] = [];
+            for (const tm of segPre.matchAll(/\S+/g)) segTokensWithPos.push({ text: tm[0], index: tm.index });
+            let winStart = segTokensWithPos.length ? segTokensWithPos[segTokensWithPos.length - 1].index : 0;
+            if (
+              segTokensWithPos.length >= 2 &&
+              segTokensWithPos[segTokensWithPos.length - 2].text === "사실로"
+            ) {
+              winStart = segTokensWithPos[segTokensWithPos.length - 2].index;
+            }
+            let priorClauseInSeg = false;
+            for (const am of segPre.matchAll(new RegExp(ASSERTIVE_HINT.source, "g"))) {
+              // 다중 토큰 술어("결론에 도달했")는 창과 겹치면 명제 내부로
+              // 본다 — 매치 끝이 창 시작보다 앞에 있을 때만 선행 단정
+              // (Codex 리뷰 47차 P2).
+              if (am.index + am[0].length <= winStart) priorClauseInSeg = true;
+            }
+            if (
+              !priorClauseInSeg &&
+              !ASSERTIVE_HINT.test(beforeSeg) &&
+              !TITLE_ASSERTIVE.test(beforeSeg.trim())
+            ) {
+              stripped = kept;
+            }
+          }
+        }
+        return ASSERTIVE_HINT.test(stripped) || TITLE_ASSERTIVE.test(stripped.trim());
+      });
+      if (badClause) {
+        violations.push({
+          kind: "status",
+          detail: `사실 상태가 ${card.status}인데 단정형 문장이 있다: "${unit.slice(0, 40)}" — 확정되지 않은 사건을 확인된 것처럼 쓰지 말 것`,
+        });
+        break;
+      }
+    }
+  }
+  // 동일 detail 중복 제거 (같은 수치가 제목·시사점에 반복될 때)
+  const seen = new Set<string>();
+  return violations.filter((v) => {
+    const key = `${v.kind}|${v.detail}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** Pass 1 카드 + Pass 2 산출물 → 최종 페이로드. 등급은 decideGrade가 정한다. */
+export function buildPayloadFromCard(
+  card: FactCard,
+  write: { title?: unknown; takeaway?: unknown; summary?: unknown },
   entry: { title: string; source: string; sourceUrl: string; summary: string; date: number },
 ): IngestPayload {
   // 26차 P0: 최종 출력 전 오타 교정 — 재작성 시 모델이 입력 오타를 답습하는 문제 대응
-  const title = fixTypos(polishTitle(String(json.title || entry.title)));
-  const takeaway = fixTypos(polishTakeaway(String(json.takeaway || entry.summary)));
-  const summary = String(json.summary || entry.summary)
-    .replace(/…/g, "...")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 900);
-  const grade = polishGrade(
-    json.grade === "breaking" || json.grade === "important" || json.grade === "note"
-      ? json.grade
-      : "note",
-    title,
-    takeaway,
-    entry.title,
+  const title = fixTypos(polishTitle(String(write.title || entry.title)));
+  const takeaway = fixTypos(polishTakeaway(String(write.takeaway || entry.summary)));
+  const summary = fixTypos(
+    String(write.summary || entry.summary)
+      .replace(/…/g, "...")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 900),
   );
-  const topics = Array.isArray(json.topics)
-    ? json.topics.filter((x): x is string => typeof x === "string" && Boolean(TOPIC_MAP[x])).slice(0, 4)
-    : [];
   return {
     title,
     takeaway: takeaway || clipChars(entry.summary, 90),
@@ -607,10 +1766,13 @@ export function polishPayload(
     source: entry.source,
     sourceUrl: entry.sourceUrl,
     originalTitle: entry.title,
-    grade,
-    tip: Boolean(json.tip),
-    topics,
+    grade: decideGrade(card, title, takeaway, entry.title),
+    tip: card.tip,
+    topics: card.topics,
     publishedAt: entry.date,
-    keep: json.keep === false ? false : true,
+    keep: true,
+    card,
+    score: card.importance,
+    hardGate: card.hardGate,
   };
 }
