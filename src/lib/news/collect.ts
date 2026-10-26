@@ -1,10 +1,12 @@
 import { isSeedItem } from "./data";
 import { chatJson, resolveLlm } from "./llm";
 import {
+  assessShadow,
   buildPayloadFromCard,
   FACT_SYSTEM,
   factUser,
   fixTypos,
+  hasStrongSignal,
   needsRewrite,
   parseFactCard,
   shouldDrop,
@@ -29,17 +31,51 @@ import {
   ensureSeeded,
   finishRun,
   getFeedCache,
+  hash12,
   insertItem,
   lastRunAt,
   listAllSourceUrls,
   listNews,
+  pruneDropLedger,
+  pruneOldRuns,
+  recordDropLedger,
   releaseCollectLock,
   setFeedCache,
   tryCollectLock,
   updateItem,
   upsertBriefing,
 } from "./repo";
-import type { CollectResult, CollectStats, FactCard, IngestPayload, NewsItem } from "./types";
+import type {
+  CollectDetail,
+  CollectResult,
+  CollectStats,
+  DropLedgerRow,
+  FactCard,
+  IngestPayload,
+  NewsItem,
+  ScoredEntry,
+  SourceStageCounts,
+} from "./types";
+
+/** Phase 2 후속: 수집 규칙 버전. 수집·선택·등급 규칙이 바뀌면 올린다. */
+export const COLLECT_RULE_VERSION = "p2f-1";
+
+/** Phase 2 후속: 저빈도 소스 (7일 평균 1건/일 미만 — METR·Alignment Forum).
+ *  신선도 6→48시간 + 두 소스 합쳐 회차당 최대 2건의 배치 기회 (편입 보장 없음). */
+export const LOW_FREQ_SOURCE_IDS = new Set(["metr", "alignmentforum"]);
+
+/**
+ * Phase 2 후속: 드레인 24시간 추가 허용량. 기본 캡 6건은 유지하고,
+ * 드레인으로 소스당 24시간 합계 최대 8건까지만 추가한다.
+ * 일반 경로로는 24시간 삽입이 6건을 넘을 수 없으므로, 6건 초과분은
+ * 전부 과거 드레인 삽입이다 — 별도 드레인 장부 없이 이 식으로 센다
+ * (rewriteStale은 삽입이 아니라 갱신·삭제라 이 식을 깨지 않는다.
+ * 단, ingestPayloads(X 보충 경로)는 캡을 우회하므로 그 경로가 다시
+ * 살아나면 이 식은 과대 계상한다 — 그때는 드레인 장부로 바꿀 것).
+ */
+export function drainRemainingAllowance(recentInserts24h: number): number {
+  return Math.max(0, 2 - Math.max(0, recentInserts24h - 6));
+}
 
 /** Phase 0 계측 카운터 초기화 (전 필드 0). */
 export function newCollectStats(): CollectStats {
@@ -60,6 +96,67 @@ export function newCollectStats(): CollectStats {
     dropKeepFalse: 0,
     dropNewCap: 0,
     dropInsertFail: 0,
+    keptNew: 0,
+    drainCandidates: 0,
+    drainBatch: 0,
+    drainInserted: 0,
+    tipSlotBatch: 0,
+    tipSlotInserted: 0,
+    lowFreqBatch: 0,
+    lowFreqInserted: 0,
+    generalWaitlist: 0,
+    dropBatchFull: 0,
+  };
+}
+
+/**
+ * Phase 2 후속: 저빈도 공유 상한 판정. 저빈도 소스의 배치 선택은 모든 레인
+ * (일반·tip·드레인·반환)을 합쳐 회차당 최대 2건·소스당 1건으로 제한한다 —
+ * 전용 슬롯 단계에서만 세면 일반 단계에서 이미 뽑힌 분이 상한을 넘는다
+ * (Codex 리뷰 P1-2). check()와 드레인 단계가 함께 쓴다.
+ */
+export function lowFreqCapReached(totalSelected: number, perSourceSelected: number): boolean {
+  return totalSelected >= 2 || perSourceSelected >= 1;
+}
+
+/**
+ * Phase 2 후속: 배치 입장 캡 판정 (유사도 제외 순수 부분 — 테스트 가능).
+ * 우선순위: inDb → 저빈도 공유 상한 → 소스캡 → 배치 소스캡.
+ * 저빈도 상한이 소스캡보다 앞선다 — 두 캡이 동시에 걸린 저빈도 후보는
+ * 소스캡 풀(드레인 대상)이 아니라 배치 소스캡 family로 종결해야 하기 때문이다
+ * (Codex 3차 리뷰: 반환 단계 cap 분기가 저빈도 초과분을 sourceCap으로 뭉개던 문제).
+ */
+export function admissionCapDecision(args: {
+  inDb: boolean;
+  sourceCount: number;
+  sourceCap: number;
+  batchCount: number;
+  batchSourceCap: number;
+  isLowFreq: boolean;
+  lowFreqTotal: number;
+  lowFreqPerSource: number;
+}): "inDb" | "cap" | "batchCap" | "pass" {
+  if (args.inDb) return "inDb";
+  if (args.isLowFreq && lowFreqCapReached(args.lowFreqTotal, args.lowFreqPerSource))
+    return "batchCap";
+  if (args.sourceCount >= args.sourceCap) return "cap";
+  if (args.batchCount >= args.batchSourceCap) return "batchCap";
+  return "pass";
+}
+
+/** Phase 2 후속: 소스별 단계 카운터 초기화. */
+export function newSourceStageCounts(): SourceStageCounts {
+  return {
+    fetched: 0,
+    kept: 0,
+    inDb: 0,
+    cap: 0,
+    batchCap: 0,
+    similar: 0,
+    batch: 0,
+    scored: 0,
+    inserted: 0,
+    drain: 0,
   };
 }
 
@@ -169,16 +266,22 @@ export async function collectOnce(): Promise<CollectResult> {
       // 병렬로 항목을 삭제하더라도 그 URL은 이번 run에서 보수적으로
       // '기존'으로 남는다 (허용 — 다음 run에서 재분류된다).
       const allSourceUrls = await listAllSourceUrls();
+      // Phase 2 후속: 소스별 단계 맵 (ingest_runs 행·POST 응답에 남는다).
+      const bySource = new Map<string, SourceStageCounts>();
+      const srcCounts = (name: string): SourceStageCounts => {
+        const c = bySource.get(name) ?? newSourceStageCounts();
+        bySource.set(name, c);
+        return c;
+      };
       // rewriteStale과 pullRss는 독립적이므로 병렬 실행 (Vercel 60초 제한 대응)
       const [rewritten, entries] = await Promise.all([
         rewriteStale(existing, retryBudget),
-        pullRss(stats),
+        pullRss(stats, bySource),
       ]);
       statsStage = "dedupe";
       // rewriteStale이 삭제/업데이트했을 수 있으므로 최신 피드로 다시 조회 후 중복 정리 (P2)
       const deduped = await dedupeExisting(await listNews());
       fetched = entries.length;
-      const fresh: RawEntry[] = [];
       const newCap = rewritten > 0 ? Math.min(5, COLLECT_MAX_NEW) : COLLECT_MAX_NEW;
       // 중복 체크는 전체 URL Set으로 (순차 DB 왕복 제거). existingItems(200건 창)는
       // 유사도 검사·sourceCounts·거버너 용도로만 현행 유지한다.
@@ -194,53 +297,324 @@ export async function collectOnce(): Promise<CollectResult> {
       // 풍선 방지 취지(최근 피드에서 단일 소스 점유 제한)는 24시간 기준으로 유지된다.
       const SOURCE_CAP = 6;
       const sourceCounts = await countRecentInsertsBySource(Date.now() - 24 * 3600 * 1000);
-      // P0-2: 컷오프는 분류 뒤로 이동. 후보를 넉넉히(최대 24건·소스당 최대 3건) 수집 → 전원 분류 → keep=true 중 상위 newCap건만 편입
+      // Phase 2 후속: 다단계 배치 선택 (배치·편입 상한 24건·6건은 유지).
+      //  1) 일반: 최대 22슬롯 (tip 예약 2슬롯을 남긴다).
+      //  2) tipLane 예약: 24건 중 2슬롯 (미사용분은 아래 단계로 반환, 편입 보장 없음).
+      //  3) 저빈도 공유 슬롯: METR·Alignment Forum 합쳐 최대 2건·소스당 1건.
+      //     상한은 전 레인 공유 카운터로 적용한다 — 일반 단계에서 이미 뽑힌
+      //     분까지 합쳐 2건·소스당 1건을 넘지 않는다.
+      //  4) 드레인 파일럿: 회차당 최대 4건, 소스당 회차당 1건·24h 추가 2건
+      //     (합계 최대 8건), 발행 48h 이내·소스 내 오래된 것부터(FIFO).
+      //     해당 소스의 최종 40건 창 점유 8건 이상이면 그 소스 드레인 중단.
+      //  5) 반환: 일반 대기열을 남은 슬롯에 채운다.
+      //     반환 후 남은 대기열은 배치 상한 탈락(dropBatchFull)으로 종결한다.
+      // 소스캡에 걸린 후보는 즉시 탈락으로 세지 않고 드레인 풀에 모은 뒤
+      // 드레인 단계에서 최종 판정한다 (선택되면 batch, 아니면 cap 탈락).
+      // 배치 소스당 상한은 3→4건으로 올린다 (모든 레인 합산).
+      // 전량을 검토하므로 조기 종료가 없고, 구 dropBatchMax(미검토 후순위)는
+      // 항상 0이다 — 대신 대기열·풀 규모를 generalWaitlist·drainCandidates로 남긴다.
+      // 항등식: kept = inDb + cap + batchCap + similar + batchFull + batch.
       const BATCH_MAX = 24;
-      const BATCH_SOURCE_CAP = 3;
+      const BATCH_SOURCE_CAP = 4;
+      const GENERAL_SLOTS = BATCH_MAX - 2;
+      const TIP_RESERVE = 2;
+      const LOWFREQ_ROUND_MAX = 2;
+      const LOWFREQ_PER_SOURCE = 1;
+      const DRAIN_ROUND_MAX = 4;
+      const DRAIN_PER_SOURCE_ROUND = 1;
+      const DRAIN_MAX_AGE_MS = 48 * 3600 * 1000;
+      const WINDOW_40 = 40;
       statsStage = "batch";
       const batchSourceCounts = new Map<string, number>();
-      let batchProcessed = 0;
-      for (const e of entries) {
-        batchProcessed += 1;
-        if (existingUrls.has(e.sourceUrl)) {
-          skipped += 1;
+      const fresh: LaneEntry[] = [];
+      // 원장 수집: 배치 단계 탈락 + 뒤의 분류·편입 탈락을 모아 finalize 전에 1번 쓴다.
+      const ledgerRows: DropLedgerRow[] = [];
+      const ledgerPush = (row: DropLedgerRow) => {
+        ledgerRows.push(row);
+      };
+      // 최종 40건 창 소스별 점유 (드레인 중단 판정용 — 거버너 창과 동일).
+      const window40Counts = new Map<string, number>();
+      for (const i of existingItems.slice(0, WINDOW_40)) {
+        window40Counts.set(i.source, (window40Counts.get(i.source) ?? 0) + 1);
+      }
+      const decided = new Set<string>();
+      const capPool: RawEntry[] = [];
+      const generalWaitlist: RawEntry[] = [];
+      // Phase 2 후속 (Codex 리뷰 P1-2): 저빈도 선택량은 전 레인 공유 카운터로 센다.
+      // 전용 슬롯 단계에서만 세면 일반 단계에서 뽑힌 분이 상한을 넘기기 때문이다.
+      let lowFreqSelectedTotal = 0;
+      const lowFreqSelectedBySource = new Map<string, number>();
+      const findSimilar = (e: RawEntry): { id: string } | null => {
+        const hit = existingItems.find(
+          (i) =>
+            tooSimilar(i.title, e.title, i.publishedAt, e.date) ||
+            tooSimilar(i.originalTitle, e.title, i.publishedAt, e.date),
+        );
+        if (hit) return { id: hit.id };
+        const f = fresh.find((x) => tooSimilar(x.title, e.title, x.date, e.date));
+        if (f) return { id: hash12(f.sourceUrl) };
+        return null;
+      };
+      const countDrop = (
+        e: RawEntry,
+        kind: "inDb" | "batchCap" | "similar",
+        similarId?: string | null,
+      ) => {
+        skipped += 1;
+        if (kind === "inDb") {
           stats.dropAlreadyInDb += 1;
+          srcCounts(e.source).inDb += 1;
+        } else if (kind === "batchCap") {
+          stats.dropBatchSourceCap += 1;
+          srcCounts(e.source).batchCap += 1;
+          ledgerPush({
+            urlHash: hash12(e.sourceUrl),
+            titleHash: hash12(e.title),
+            source: e.source,
+            sourceId: e.sourceId,
+            publishedAt: e.date,
+            lastStage: "batchSourceCap",
+            similarId: null,
+          });
+        } else {
+          stats.dropSimilar += 1;
+          srcCounts(e.source).similar += 1;
+          ledgerPush({
+            urlHash: hash12(e.sourceUrl),
+            titleHash: hash12(e.title),
+            source: e.source,
+            sourceId: e.sourceId,
+            publishedAt: e.date,
+            lastStage: "similar",
+            similarId: similarId ?? null,
+          });
+        }
+        decided.add(e.sourceUrl);
+      };
+      const select = (e: RawEntry, lane: BatchLane) => {
+        fresh.push({ ...e, lane });
+        existingUrls.add(e.sourceUrl); // 같은 배치 내 중복 방지
+        sourceCounts.set(e.source, (sourceCounts.get(e.source) ?? 0) + 1);
+        batchSourceCounts.set(e.source, (batchSourceCounts.get(e.source) ?? 0) + 1);
+        srcCounts(e.source).batch += 1;
+        if (lane === "drain") srcCounts(e.source).drain += 1;
+        if (e.sourceId && LOW_FREQ_SOURCE_IDS.has(e.sourceId)) {
+          lowFreqSelectedTotal += 1;
+          lowFreqSelectedBySource.set(
+            e.sourceId,
+            (lowFreqSelectedBySource.get(e.sourceId) ?? 0) + 1,
+          );
+        }
+        decided.add(e.sourceUrl);
+      };
+      // 공통 검사: 입장 캡 판정(admissionCapDecision) + 유사 검사.
+      // 저빈도 상한이 소스캡보다 앞선다 — 두 캡이 동시에 걸리면 batchCap 종결이다.
+      // 반환: "ok" | "inDb" | "cap" | "batchCap" | "similar".
+      const check = (e: RawEntry): "ok" | "inDb" | "cap" | "batchCap" | "similar" => {
+        const cap = admissionCapDecision({
+          inDb: existingUrls.has(e.sourceUrl),
+          sourceCount: sourceCounts.get(e.source) ?? 0,
+          sourceCap: SOURCE_CAP,
+          batchCount: batchSourceCounts.get(e.source) ?? 0,
+          batchSourceCap: BATCH_SOURCE_CAP,
+          isLowFreq: Boolean(e.sourceId && LOW_FREQ_SOURCE_IDS.has(e.sourceId)),
+          lowFreqTotal: lowFreqSelectedTotal,
+          lowFreqPerSource: e.sourceId
+            ? (lowFreqSelectedBySource.get(e.sourceId) ?? 0)
+            : 0,
+        });
+        if (cap !== "pass") return cap;
+        if (findSimilar(e)) return "similar";
+        return "ok";
+      };
+      const runStage = (
+        e: RawEntry,
+        lane: BatchLane,
+        slotLimit: () => boolean,
+        onCapPool = true,
+      ): boolean => {
+        // slotLimit이 false면 이 단계의 슬롯이 찬 것 — 호출부가 순회를 멈춘다.
+        if (!slotLimit()) return false;
+        if (decided.has(e.sourceUrl)) return true;
+        const r = check(e);
+        if (r === "ok") {
+          select(e, lane);
+        } else if (r === "cap") {
+          if (onCapPool) capPool.push(e);
+          // 풀행은 아직 탈락이 아니다 — 드레인 단계에서 최종 판정한다.
+          // decided에는 넣지 않는다 (드레인 단계에서 다시 본다).
+        } else if (r === "inDb") {
+          countDrop(e, "inDb");
+        } else if (r === "batchCap") {
+          countDrop(e, "batchCap");
+        } else {
+          countDrop(e, "similar", findSimilar(e)?.id ?? null);
+        }
+        return true;
+      };
+      // 1) 일반: 최대 22슬롯. 슬롯이 차면 통과 후보는 대기열로.
+      for (const e of entries) {
+        if (decided.has(e.sourceUrl)) continue;
+        if (fresh.length >= GENERAL_SLOTS) {
+          // 슬롯 초과 — 통과 후보만 대기열에 남기고 나머지는 그대로 판정한다.
+          // (검사 순서: inDb·캡·배치캡·유사는 runStage와 동일하게 처리)
+          const r = check(e);
+          if (r === "ok") generalWaitlist.push(e);
+          else if (r === "cap") capPool.push(e);
+          else if (r === "inDb") countDrop(e, "inDb");
+          else if (r === "batchCap") countDrop(e, "batchCap");
+          else countDrop(e, "similar", findSimilar(e)?.id ?? null);
           continue;
         }
-        // 소스별 캡 체크: 이미 6건 이상인 소스는 스킵
-        const sourceCount = sourceCounts.get(e.source) ?? 0;
-        if (sourceCount >= SOURCE_CAP) {
+        runStage(e, "general", () => true);
+      }
+      // 2) tipLane 예약: 2슬롯 (미사용분은 드레인·반환 단계로).
+      let tipSlotsUsed = 0;
+      for (const e of entries) {
+        if (tipSlotsUsed >= TIP_RESERVE || fresh.length >= BATCH_MAX) break;
+        if (!e.tipLane || decided.has(e.sourceUrl)) continue;
+        if (capPool.includes(e)) continue; // 이미 풀에 있음 — 드레인 단계에서 본다.
+        const before = fresh.length;
+        runStage(e, "tip", () => tipSlotsUsed < TIP_RESERVE && fresh.length < BATCH_MAX);
+        if (fresh.length > before) tipSlotsUsed += 1;
+      }
+      stats.tipSlotBatch = tipSlotsUsed;
+      // 3) 저빈도 공유 슬롯: 두 소스 합쳐 최대 2건·소스당 1건.
+      let lowFreqUsed = 0;
+      const lowFreqPerSource = new Map<string, number>();
+      for (const e of entries) {
+        if (lowFreqUsed >= LOWFREQ_ROUND_MAX || fresh.length >= BATCH_MAX) break;
+        if (!e.sourceId || !LOW_FREQ_SOURCE_IDS.has(e.sourceId)) continue;
+        if (decided.has(e.sourceUrl) || capPool.includes(e)) continue;
+        if ((lowFreqPerSource.get(e.sourceId) ?? 0) >= LOWFREQ_PER_SOURCE) continue;
+        const before = fresh.length;
+        runStage(e, "lowfreq", () => fresh.length < BATCH_MAX);
+        if (fresh.length > before) {
+          lowFreqUsed += 1;
+          lowFreqPerSource.set(e.sourceId, (lowFreqPerSource.get(e.sourceId) ?? 0) + 1);
+        }
+      }
+      stats.lowFreqBatch = lowFreqUsed;
+      // 4) 드레인 파일럿: 풀에서 발행 48h 이내만, 오래된 것부터(FIFO).
+      // 소스당 회차 1건·24h 추가 2건·창 점유 8건·배치 소스당 4건을 모두 지킨다.
+      stats.drainCandidates = capPool.length;
+      const drainEligible = capPool
+        .filter((e) => Date.now() - e.date <= DRAIN_MAX_AGE_MS)
+        .sort((a, b) => a.date - b.date);
+      let drainUsed = 0;
+      const drainPerSource = new Map<string, number>();
+      const drainSelected = new Set<string>();
+      for (const e of drainEligible) {
+        if (drainUsed >= DRAIN_ROUND_MAX || fresh.length >= BATCH_MAX) break;
+        if ((drainPerSource.get(e.source) ?? 0) >= DRAIN_PER_SOURCE_ROUND) continue;
+        if ((window40Counts.get(e.source) ?? 0) >= 8) continue;
+        if (drainRemainingAllowance(sourceCounts.get(e.source) ?? 0) <= 0) continue;
+        if ((batchSourceCounts.get(e.source) ?? 0) >= BATCH_SOURCE_CAP) continue;
+        // 저빈도 공유 상한은 드레인에서도 적용된다 — 초과분은 배치 소스캡
+        // family로 즉시 종결한다 (풀 확정 시 소스캡으로 뭉개지 않게).
+        if (
+          e.sourceId &&
+          LOW_FREQ_SOURCE_IDS.has(e.sourceId) &&
+          lowFreqCapReached(
+            lowFreqSelectedTotal,
+            lowFreqSelectedBySource.get(e.sourceId) ?? 0,
+          )
+        ) {
+          countDrop(e, "batchCap");
+          continue;
+        }
+        // 드레인 단계의 유사 재검사: 일반 단계 이후 fresh가 늘었을 수 있다.
+        const sim = findSimilar(e);
+        if (sim) {
+          countDrop(e, "similar", sim.id);
+          continue;
+        }
+        select(e, "drain");
+        drainSelected.add(e.sourceUrl);
+        drainUsed += 1;
+        drainPerSource.set(e.source, (drainPerSource.get(e.source) ?? 0) + 1);
+      }
+      stats.drainBatch = drainUsed;
+      // 드레인에 뽑히지 않은 풀 후보는 최종적으로 소스캡 탈락으로 확정한다
+      // (창 점유·연령·쿼터로 걸러진 것 포함 — 다음 회차에 다시 풀에 들어간다).
+      // 단, 저빈도 공유 상한에 이미 도달한 소스라면 초과분은 batchCap family로
+      // 종결한다 (Codex 재리뷰 P1-2: 드레인 회차 상한·창 점유 등으로 먼저
+      // 건너뛴 후보도 종결 시점의 상한으로 사유를 가린다).
+      for (const e of capPool) {
+        if (drainSelected.has(e.sourceUrl)) continue;
+        if (decided.has(e.sourceUrl)) continue; // 유사·저빈도 탈락으로 이미 처리됨
+        if (
+          e.sourceId &&
+          LOW_FREQ_SOURCE_IDS.has(e.sourceId) &&
+          lowFreqCapReached(
+            lowFreqSelectedTotal,
+            lowFreqSelectedBySource.get(e.sourceId) ?? 0,
+          )
+        ) {
+          countDrop(e, "batchCap");
+          continue;
+        }
+        skipped += 1;
+        stats.dropSourceCap += 1;
+        srcCounts(e.source).cap += 1;
+        ledgerPush({
+          urlHash: hash12(e.sourceUrl),
+          titleHash: hash12(e.title),
+          source: e.source,
+          sourceId: e.sourceId,
+          publishedAt: e.date,
+          lastStage: "sourceCap",
+          similarId: null,
+        });
+        decided.add(e.sourceUrl);
+      }
+      // 5) 반환: 일반 대기열을 남은 슬롯에 채운다 (검사 재수행 — 슬롯 단계 이후
+      // fresh·캡 상태가 바뀌었을 수 있다).
+      for (const e of generalWaitlist) {
+        if (fresh.length >= BATCH_MAX) break;
+        if (decided.has(e.sourceUrl)) continue; // tip·저빈도 단계에서 이미 선택됨
+        const r = check(e);
+        if (r === "ok") select(e, "general");
+        else if (r === "cap") {
           skipped += 1;
           stats.dropSourceCap += 1;
-          continue;
-        }
-        // 배치 내 소스당 최대 3건 — 고순위 소스(AI타임스 등)의 슬롯 독점 방지
-        const batchCount = batchSourceCounts.get(e.source) ?? 0;
-        if (batchCount >= BATCH_SOURCE_CAP) {
-          skipped += 1;
-          stats.dropBatchSourceCap += 1;
-          continue;
-        }
-        if (
-          existingItems.some(
-            (i) =>
-              tooSimilar(i.title, e.title, i.publishedAt, e.date) ||
-              tooSimilar(i.originalTitle, e.title, i.publishedAt, e.date),
-          ) ||
-          fresh.some((f) => tooSimilar(f.title, e.title, f.date, e.date))
-        ) {
-          skipped += 1;
-          stats.dropSimilar += 1;
-          continue;
-        }
-        fresh.push(e);
-        existingUrls.add(e.sourceUrl); // 같은 배치 내 중복 방지
-        sourceCounts.set(e.source, sourceCount + 1);
-        batchSourceCounts.set(e.source, batchCount + 1);
-        if (fresh.length >= BATCH_MAX) break;
+          srcCounts(e.source).cap += 1;
+          ledgerPush({
+            urlHash: hash12(e.sourceUrl),
+            titleHash: hash12(e.title),
+            source: e.source,
+            sourceId: e.sourceId,
+            publishedAt: e.date,
+            lastStage: "sourceCap",
+            similarId: null,
+          });
+          // Codex 재리뷰 P1-1: decided 누락 시 뒤의 잔여 루프가 같은 후보를
+          // dropBatchFull로 이중 집계한다 — 여기서 종결한다.
+          decided.add(e.sourceUrl);
+        } else if (r === "batchCap") countDrop(e, "batchCap");
+        else countDrop(e, "similar", findSimilar(e)?.id ?? null);
       }
-      // BATCH_MAX로 루프를 조기 종료한 경우, 검토조차 못한 후순위 건수
-      stats.dropBatchMax = entries.length - batchProcessed;
+      // 반환 후에도 남은 대기열은 배치 상한 탈락으로 종결한다 (Codex 리뷰 P1-1).
+      // 종결하지 않으면 kept 항등식에서 누락된다 — dropBatchMax(미검토 후순위)와는
+      // 별개로, 검토는 됐으나 슬롯이 없어 못 들어간 후보를 dropBatchFull로 센다.
+      for (const e of generalWaitlist) {
+        if (decided.has(e.sourceUrl)) continue;
+        skipped += 1;
+        stats.dropBatchFull = (stats.dropBatchFull ?? 0) + 1;
+        ledgerPush({
+          urlHash: hash12(e.sourceUrl),
+          titleHash: hash12(e.title),
+          source: e.source,
+          sourceId: e.sourceId,
+          publishedAt: e.date,
+          lastStage: "batchFull",
+          similarId: null,
+        });
+        decided.add(e.sourceUrl);
+      }
+      stats.generalWaitlist = generalWaitlist.length;
+      stats.keptNew = stats.kept - stats.dropAlreadyInDb;
+      stats.dropBatchMax = 0;
       stats.batch = fresh.length;
 
       // P0-1: summary가 빈 fresh 후보는 기사 본문 첫 ~500자를 발췌해 보강 (제목만 보고 keep=false 탈락 방지)
@@ -267,24 +641,75 @@ export async function collectOnce(): Promise<CollectResult> {
       }
       const heldCount = classified.filter((p) => p.held).length;
       if (heldCount > 0) stats.deskHeld = heldCount;
+      // Phase 2 후속: Pass 1 건별 기록 (등급 결정에는 쓰지 않는 섀도 포함).
+      // importance는 원값, 버킷은 조회 시 파생한다. grade는 거버너 적용 후 값.
+      const scored: ScoredEntry[] = classified.map((payload, i) => {
+        const entry = fresh[i];
+        const card = payload.card;
+        const shadow = card
+          ? assessShadow(card, payload.title, payload.takeaway, payload.originalTitle)
+          : { tier: "none" as const, promotesA: false, promotesAB: false, shadowGrade: "note" as const };
+        srcCounts(entry.source).scored += 1;
+        return {
+          hash: hash12(entry.sourceUrl),
+          titleHash: hash12(payload.originalTitle || entry.title),
+          source: entry.source,
+          sourceId: entry.sourceId,
+          importance: payload.score ?? card?.importance ?? null,
+          tip: payload.tip,
+          eventType: card?.eventType ?? null,
+          impactBasis: card?.impactBasis ?? [],
+          hasEvidence: Boolean(card?.evidence && card.evidence.trim()),
+          strongSignal: hasStrongSignal(payload.title, payload.takeaway, payload.originalTitle),
+          shadowTier: shadow.tier,
+          shadowGrade: shadow.shadowGrade,
+          promotesA: shadow.promotesA,
+          promotesAB: shadow.promotesAB,
+          grade: payload.grade,
+          lane: entry.lane,
+          held: payload.held ?? false,
+          holdKinds: payload.holdKinds ?? [],
+        };
+      });
+      stats.ruleVersion = COLLECT_RULE_VERSION;
+      stats.model = resolveLlm()?.model ?? null;
       statsStage = "insert";
-      for (const payload of classified) {
+      for (let i = 0; i < classified.length; i++) {
+        const payload = classified[i];
+        const entry = fresh[i];
+        const dropRow = (stage: DropLedgerRow["lastStage"]): DropLedgerRow => ({
+          urlHash: hash12(payload.sourceUrl),
+          titleHash: hash12(payload.originalTitle || entry.title),
+          source: payload.source,
+          sourceId: entry.sourceId,
+          publishedAt: payload.publishedAt ?? entry.date,
+          lastStage: stage,
+          similarId: null,
+        });
         if (payload.keep === false) {
           skipped += 1;
           stats.dropKeepFalse += 1;
+          ledgerPush(dropRow("keepFalse"));
           continue;
         }
         // P0-2: 분류 뒤 컷오프 — keep=true 중 상위 newCap건만 편입 (entries는 byDeskPriority 정렬 순서 유지)
         if (inserted >= newCap) {
           skipped += 1;
           stats.dropNewCap += 1;
+          ledgerPush(dropRow("newCap"));
           continue;
         }
         const ok = await insertItem(payload);
-        if (ok) inserted += 1;
-        else {
+        if (ok) {
+          inserted += 1;
+          srcCounts(payload.source).inserted += 1;
+          if (entry.lane === "drain") stats.drainInserted = (stats.drainInserted ?? 0) + 1;
+          if (entry.lane === "tip") stats.tipSlotInserted = (stats.tipSlotInserted ?? 0) + 1;
+          if (entry.lane === "lowfreq") stats.lowFreqInserted = (stats.lowFreqInserted ?? 0) + 1;
+        } else {
           skipped += 1;
           stats.dropInsertFail += 1;
+          ledgerPush(dropRow("insertFail"));
         }
       }
 
@@ -300,12 +725,35 @@ export async function collectOnce(): Promise<CollectResult> {
 
       // Phase 0 계측: 단계별 카운터를 구조화 로그로 남긴다 (Vercel 함수 로그).
       console.log(`[collect-stats] ${JSON.stringify(stats)}`);
+      // Phase 2 후속: 원장·보존 정책은 best-effort — 실패해도 수집 결과는 유지한다.
+      const detail: CollectDetail = {
+        bySource: Object.fromEntries(bySource),
+        scored,
+      };
+      try {
+        await recordDropLedger(ledgerRows);
+      } catch (err) {
+        console.log(`[collect-ledger] 원장 기록 실패 (무시): ${err instanceof Error ? err.message : "unknown"}`);
+      }
+      try {
+        await pruneDropLedger(Date.now() - 14 * 24 * 3600 * 1000);
+        await pruneOldRuns(Date.now() - 90 * 24 * 3600 * 1000);
+      } catch {
+        /* 보존 정리 실패는 무시 */
+      }
       await finishRun(runId, {
         status: "ok",
         fetched,
         inserted,
         skipped,
         note,
+        detail: {
+          stats,
+          bySource: detail.bySource,
+          scored: detail.scored,
+          ruleVersion: COLLECT_RULE_VERSION,
+          model: stats.model ?? null,
+        },
       });
       return {
         ok: true,
@@ -316,6 +764,7 @@ export async function collectOnce(): Promise<CollectResult> {
         note,
         lastRunAt: Date.now(),
         stats,
+        detail,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : "collect failed";
@@ -329,6 +778,7 @@ export async function collectOnce(): Promise<CollectResult> {
         inserted,
         skipped,
         note: message,
+        detail: { stats: statsSnapshot, ruleVersion: COLLECT_RULE_VERSION, model: stats.model ?? null },
       });
       return {
         ok: false,
@@ -354,7 +804,15 @@ type RawEntry = {
   summary: string;
   titleMustMatch?: boolean;
   secTitleHint?: boolean;
+  /** Phase 2 후속: 소스 id (저빈도 슬롯·원장 귀속용). 구 캐시 페이로드에는 없을 수 있다. */
+  sourceId?: string;
+  /** Phase 2 후속: 팁 레인 소속 (sources.ts tipLane). */
+  tipLane?: boolean;
 };
+
+/** Phase 2 후속: 배치 진입 레인. */
+type BatchLane = "general" | "tip" | "lowfreq" | "drain";
+type LaneEntry = RawEntry & { lane: BatchLane };
 
 /** P0-1: RSS에 description이 없는 기사는 본문 첫 ~500자를 발췌 (제목만 보고 탈락 방지). 실패 시 "" 반환. */
 async function fetchArticleLede(url: string): Promise<string> {
@@ -461,6 +919,8 @@ export async function fetchSourceEntries(src: NewsSource): Promise<RawEntry[]> {
       summary: e.summary,
       titleMustMatch: Boolean(src.titleMustMatch),
       secTitleHint: Boolean(src.secTitleHint),
+      sourceId: src.id,
+      tipLane: Boolean(src.tipLane),
     }));
     // 검증자·파싱 결과 저장은 본문을 끝까지 읽고 파싱까지 성공한 뒤에만 한다.
     // 먼저 저장하면 본문 전송 실패 시 캐시만 갱신돼 다음 304에서
@@ -480,13 +940,39 @@ export async function fetchSourceEntries(src: NewsSource): Promise<RawEntry[]> {
   }
 }
 
-async function pullRss(stats?: CollectStats): Promise<RawEntry[]> {
+async function pullRss(
+  stats?: CollectStats,
+  bySource?: Map<string, SourceStageCounts>,
+): Promise<RawEntry[]> {
   const results = await Promise.all(NEWS_SOURCES.map((src) => fetchSourceEntries(src)));
-  const raw = results.flat();
+  // Phase 2 후속: 구 feed_cache 페이로드(배포 전 저장본)에는 sourceId·tipLane이
+  // 없을 수 있다 — 소스별로 다시 채워 넣는다 (304 재반환 경로 포함).
+  const enriched = results.map((list, i) =>
+    list.map((e) => ({
+      ...e,
+      sourceId: NEWS_SOURCES[i].id,
+      tipLane: NEWS_SOURCES[i].tipLane ?? e.tipLane,
+    })),
+  );
+  const raw = enriched.flat();
   if (stats) stats.rawFetched += raw.length;
+  if (bySource) {
+    enriched.forEach((list, i) => {
+      const c = bySource.get(NEWS_SOURCES[i].name) ?? newSourceStageCounts();
+      c.fetched += list.length;
+      bySource.set(NEWS_SOURCES[i].name, c);
+    });
+  }
   const keptEntries = raw.filter((e) => {
     const reason = keepDropReason(e);
-    if (!reason) return true;
+    if (!reason) {
+      if (bySource) {
+        const c = bySource.get(e.source) ?? newSourceStageCounts();
+        c.kept += 1;
+        bySource.set(e.source, c);
+      }
+      return true;
+    }
     if (stats) {
       if (reason === "skipHint") stats.dropSkipHint += 1;
       else if (reason === "vendorStory") stats.dropVendorStory += 1;
@@ -510,8 +996,14 @@ function hasHangul(s: string): boolean {
   return /[\uAC00-\uD7A3]/.test(s);
 }
 
-function byDeskPriority(a: RawEntry, b: RawEntry): number {
-  const recency = (e: RawEntry) => (Date.now() - e.date < 6 * 60 * 60 * 1000 ? 1 : 0);
+export function byDeskPriority(a: RawEntry, b: RawEntry): number {
+  // Phase 2 후속: 저빈도 소스(METR·Alignment Forum)는 신선도 창 6→48시간.
+  // 빈도가 낮아 6시간 창을 벗어나면 기회 자체가 사라지기 때문이다.
+  const recency = (e: RawEntry) => {
+    const windowMs =
+      (e.sourceId && LOW_FREQ_SOURCE_IDS.has(e.sourceId) ? 48 : 6) * 60 * 60 * 1000;
+    return Date.now() - e.date < windowMs ? 1 : 0;
+  };
   const ra = recency(a);
   const rb = recency(b);
   if (ra !== rb) return rb - ra;
@@ -1080,7 +1572,7 @@ async function classifyEntry(entry: RawEntry, budget?: RetryBudget): Promise<Ing
     console.log(
       `[desk-hold] 보류 "${entry.title.slice(0, 50)}" — ${hardLeft.map((v) => v.detail).join(" / ")}`,
     );
-    return { ...payload, keep: false, held: true };
+    return { ...payload, keep: false, held: true, holdKinds: hardLeft.map((v) => v.kind) };
   }
   const formLeft = violations.filter((v) => v.kind === "form");
   if (formLeft.length > 0) {
