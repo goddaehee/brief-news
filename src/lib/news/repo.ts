@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto";
 import postgres from "postgres";
 import { getBriefingDate, getBriefingLines, getSeedItems } from "./data";
-import type { Grade, IngestPayload, IngestRun, NewsItem } from "./types";
+import type {
+  CollectStats,
+  DropLedgerRow,
+  Grade,
+  IngestPayload,
+  IngestRun,
+  NewsItem,
+  ScoredEntry,
+  SourceStageCounts,
+} from "./types";
 
 const SCHEMA = `
 create table if not exists news_items (
@@ -48,6 +57,24 @@ create table if not exists feed_cache (
   payload text,
   updated_at timestamptz not null default now()
 );
+alter table ingest_runs add column if not exists stats text;
+alter table ingest_runs add column if not exists by_source text;
+alter table ingest_runs add column if not exists scored text;
+alter table ingest_runs add column if not exists rule_version text;
+alter table ingest_runs add column if not exists model text;
+create table if not exists drop_ledger (
+  url_hash text primary key,
+  title_hash text not null,
+  source text not null,
+  source_id text,
+  published_at timestamptz not null,
+  first_seen timestamptz not null default now(),
+  last_seen timestamptz not null default now(),
+  last_stage text not null,
+  seen_count int not null default 1,
+  similar_id text
+);
+create index if not exists drop_ledger_last_seen_idx on drop_ledger (last_seen);
 insert into collect_lock (id) values (1) on conflict (id) do nothing
 `;
 
@@ -57,8 +84,13 @@ function hasDatabaseUrl(): boolean {
   return Boolean(process.env.DATABASE_URL?.trim());
 }
 
+/** URL·제목 해시 (sha1 앞 12자리). 원문 저장 없이 건별 귀속용. */
+export function hash12(value: string): string {
+  return createHash("sha1").update(value).digest("hex").slice(0, 12);
+}
+
 function makeItemId(sourceUrl: string): string {
-  return createHash("sha1").update(sourceUrl).digest("hex").slice(0, 12);
+  return hash12(sourceUrl);
 }
 
 type SqlFn = (query: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
@@ -110,6 +142,12 @@ function getSql(): SqlFn {
   };
 }
 
+type MemLedgerRow = DropLedgerRow & {
+  firstSeen: number;
+  lastSeen: number;
+  seenCount: number;
+};
+
 type Mem = {
   items: Map<string, NewsItem>;
   urls: Set<string>;
@@ -120,6 +158,7 @@ type Mem = {
   lockUntil: number;
   lockOwner: string | null;
   feedCache: Map<string, FeedCache>;
+  dropLedger: Map<string, MemLedgerRow>;
 };
 
 function mem(): Mem {
@@ -134,6 +173,7 @@ function mem(): Mem {
       lockUntil: 0,
       lockOwner: null,
       feedCache: new Map(),
+      dropLedger: new Map(),
     };
   }
   return g.__briefMem__;
@@ -633,15 +673,63 @@ export async function beginRun(): Promise<number> {
   return id;
 }
 
+/** Phase 2 후속: 회차 상세 (ingest_runs 행에 함께 남는다).
+ *  stats는 스칼라 카운터, bySource는 소스별 맵, scored는 Pass 1 건별 기록.
+ *  JSON 직렬화 실패 시 해당 컬럼은 null로 둔다 (수집 자체를 막지 않는다). */
+export type RunDetail = {
+  stats?: CollectStats;
+  bySource?: Record<string, SourceStageCounts>;
+  scored?: ScoredEntry[];
+  ruleVersion?: string;
+  model?: string | null;
+};
+
+function jsonOrNull(value: unknown): string | null {
+  try {
+    return value === undefined ? null : JSON.stringify(value);
+  } catch {
+    return null;
+  }
+}
+
+function parseJson<T>(value: unknown): T | undefined {
+  if (value == null) return undefined;
+  try {
+    return JSON.parse(String(value)) as T;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function finishRun(
   id: number,
-  info: { status: string; fetched: number; inserted: number; skipped: number; note?: string },
+  info: {
+    status: string;
+    fetched: number;
+    inserted: number;
+    skipped: number;
+    note?: string;
+    detail?: RunDetail;
+  },
 ) {
   if (hasDatabaseUrl()) {
     const sql = getSql();
     await sql(
-      `update ingest_runs set finished_at = now(), status = $2, fetched = $3, inserted = $4, skipped = $5, note = $6 where id = $1`,
-      [id, info.status, info.fetched, info.inserted, info.skipped, info.note ?? null],
+      `update ingest_runs set finished_at = now(), status = $2, fetched = $3, inserted = $4, skipped = $5, note = $6,
+              stats = $7, by_source = $8, scored = $9, rule_version = $10, model = $11 where id = $1`,
+      [
+        id,
+        info.status,
+        info.fetched,
+        info.inserted,
+        info.skipped,
+        info.note ?? null,
+        jsonOrNull(info.detail?.stats),
+        jsonOrNull(info.detail?.bySource),
+        jsonOrNull(info.detail?.scored),
+        info.detail?.ruleVersion ?? null,
+        info.detail?.model ?? null,
+      ],
     );
     return;
   }
@@ -653,6 +741,13 @@ export async function finishRun(
     run.inserted = info.inserted;
     run.skipped = info.skipped;
     run.note = info.note;
+    if (info.detail) {
+      run.stats = info.detail.stats;
+      run.bySource = info.detail.bySource;
+      run.scored = info.detail.scored;
+      run.ruleVersion = info.detail.ruleVersion;
+      run.model = info.detail.model;
+    }
   }
 }
 
@@ -662,7 +757,8 @@ export async function listRuns(limit = 12): Promise<IngestRun[]> {
     const rows = await sql(
       `select id, (extract(epoch from started_at) * 1000) as started_ms,
               (extract(epoch from finished_at) * 1000) as finished_ms,
-              status, fetched, inserted, skipped, note
+              status, fetched, inserted, skipped, note, stats, by_source, scored,
+              rule_version, model
          from ingest_runs order by id desc limit $1`,
       [limit],
     );
@@ -675,9 +771,147 @@ export async function listRuns(limit = 12): Promise<IngestRun[]> {
       inserted: Number(row.inserted),
       skipped: Number(row.skipped),
       note: row.note == null ? undefined : String(row.note),
+      stats: parseJson<CollectStats>(row.stats),
+      bySource: parseJson<Record<string, SourceStageCounts>>(row.by_source),
+      scored: parseJson<ScoredEntry[]>(row.scored),
+      ruleVersion: row.rule_version == null ? undefined : String(row.rule_version),
+      model: row.model == null ? undefined : String(row.model),
     }));
   }
   return mem().runs.slice(0, limit);
+}
+
+/**
+ * Phase 2 후속: 건별 탈락 원장 upsert. 같은 URL은 1행으로 유지하고
+ * first_seen은 그대로, last_seen·last_stage·seen_count만 갱신한다.
+ * 본문·제목 원문은 저장하지 않고 해시만 남긴다. 빈 배열이면 no-op.
+ * 호출부는 실패를 무시해도 되도록 try/catch로 감싼다 (계측이 수집을 막지 않는다).
+ */
+export async function recordDropLedger(rows: DropLedgerRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  // Codex 리뷰 P2-1: 같은 호출 안에 동일 urlHash가 두 번 있으면
+  // PostgreSQL은 한 문장에서 같은 행을 두 번 갱신할 수 없어 문장 전체가
+  // 실패한다. 키별로 묶어 마지막 행만 남긴다 (seen_count는 호출 단위로
+  // 1씩 증가 — 메모리 경로와 동일하게 맞춘다).
+  const deduped = [...new Map(rows.map((r) => [r.urlHash, r])).values()];
+  rows = deduped;
+  if (rows.length === 0) return;
+  await ensureSchema();
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    const CHUNK = 100;
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const chunk = rows.slice(i, i + CHUNK);
+      const values: unknown[] = [];
+      const tuples = chunk.map((r) => {
+        const base = values.length;
+        values.push(
+          r.urlHash,
+          r.titleHash,
+          r.source,
+          r.sourceId ?? null,
+          new Date(r.publishedAt).toISOString(),
+          r.lastStage,
+          r.similarId ?? null,
+        );
+        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, now(), now())`;
+      });
+      await sql(
+        `insert into drop_ledger
+           (url_hash, title_hash, source, source_id, published_at, last_stage, similar_id, first_seen, last_seen)
+         values ${tuples.join(", ")}
+         on conflict (url_hash) do update set
+           title_hash = excluded.title_hash, source = excluded.source,
+           source_id = excluded.source_id, last_stage = excluded.last_stage,
+           similar_id = excluded.similar_id, last_seen = now(),
+           seen_count = drop_ledger.seen_count + 1`,
+        values,
+      );
+    }
+    return;
+  }
+  const m = mem();
+  const now = Date.now();
+  for (const r of rows) {
+    const prev = m.dropLedger.get(r.urlHash);
+    if (prev) {
+      prev.titleHash = r.titleHash;
+      prev.source = r.source;
+      prev.sourceId = r.sourceId;
+      prev.lastStage = r.lastStage;
+      prev.similarId = r.similarId ?? null;
+      prev.lastSeen = now;
+      prev.seenCount += 1;
+    } else {
+      m.dropLedger.set(r.urlHash, {
+        ...r,
+        similarId: r.similarId ?? null,
+        firstSeen: now,
+        lastSeen: now,
+        seenCount: 1,
+      });
+    }
+  }
+}
+
+/** Phase 2 후속: 원장 조회 (검증·진단용). 최신 last_seen 순. */
+export async function listDropLedger(limit = 50): Promise<MemLedgerRow[]> {
+  await ensureSchema();
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    const rows = await sql(
+      `select url_hash, title_hash, source, source_id,
+              (extract(epoch from published_at) * 1000) as published_ms,
+              (extract(epoch from first_seen) * 1000) as first_ms,
+              (extract(epoch from last_seen) * 1000) as last_ms,
+              last_stage, seen_count, similar_id
+         from drop_ledger order by last_seen desc limit $1`,
+      [limit],
+    );
+    return rows.map((row) => ({
+      urlHash: String(row.url_hash),
+      titleHash: String(row.title_hash),
+      source: String(row.source),
+      sourceId: row.source_id == null ? undefined : String(row.source_id),
+      publishedAt: Number(row.published_ms),
+      lastStage: String(row.last_stage) as DropLedgerRow["lastStage"],
+      similarId: row.similar_id == null ? null : String(row.similar_id),
+      firstSeen: Number(row.first_ms),
+      lastSeen: Number(row.last_ms),
+      seenCount: Number(row.seen_count),
+    }));
+  }
+  return [...mem().dropLedger.values()].sort((a, b) => b.lastSeen - a.lastSeen).slice(0, limit);
+}
+
+/** Phase 2 후속: 보존 정책. 원장 상세 14일, 회차 집계 90일.
+ *  beforeMs보다 오래된 행을 지운다. 호출부는 best-effort로 감싼다. */
+export async function pruneDropLedger(beforeMs: number): Promise<void> {
+  await ensureSchema();
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    await sql(`delete from drop_ledger where last_seen < $1`, [new Date(beforeMs).toISOString()]);
+    return;
+  }
+  const m = mem();
+  for (const [k, row] of m.dropLedger) {
+    if (row.lastSeen < beforeMs) m.dropLedger.delete(k);
+  }
+}
+
+export async function pruneOldRuns(beforeMs: number): Promise<void> {
+  await ensureSchema();
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    // Codex 리뷰 P1-4: 미완료 run(finished_at IS NULL)은 finished_at 기준
+    // 삭제에서 영구 제외되므로 started_at으로 폴백한다.
+    await sql(`delete from ingest_runs where coalesce(finished_at, started_at) < $1`, [
+      new Date(beforeMs).toISOString(),
+    ]);
+    return;
+  }
+  const m = mem();
+  m.runs = m.runs.filter((r) => !((r.finishedAt ?? r.startedAt) < beforeMs));
 }
 
 export async function lastRunAt(): Promise<number | null> {
