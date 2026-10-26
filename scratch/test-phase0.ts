@@ -26,8 +26,13 @@ const KEYS = [
   "rawFetched", "dropSkipHint", "dropVendorStory", "dropSecHint", "dropNoAiSignal",
   "dropUrlDup", "kept", "dropAlreadyInDb", "dropSourceCap", "dropBatchSourceCap",
   "dropSimilar", "dropBatchMax", "batch", "dropKeepFalse", "dropNewCap", "dropInsertFail",
+  // Phase 2 후속 (p2f-1): keptNew·드레인·슬롯 카운터 추가
+  "keptNew", "drainCandidates", "drainBatch", "drainInserted",
+  "tipSlotBatch", "tipSlotInserted", "lowFreqBatch", "lowFreqInserted", "generalWaitlist",
+  // Codex 재리뷰 반영: 배치 상한 탈락 카운터
+  "dropBatchFull",
 ];
-check("카운터 키 16개", Object.keys(stats).sort(), [...KEYS].sort());
+check("카운터 키 26개", Object.keys(stats).sort(), [...KEYS].sort());
 check("카운터 전부 0", KEYS.every((k) => (stats as unknown as Record<string, number>)[k] === 0), true);
 check("카운터 JSON 왕복", JSON.parse(JSON.stringify(stats)), stats);
 // 독립 인스턴스 (공유 참조 아님)
