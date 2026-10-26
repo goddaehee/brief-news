@@ -48,6 +48,8 @@ export type IngestPayload = {
   secHint?: boolean;
   /** Phase 1: 원문 대조 검증 실패로 보류(keep=false)된 경우 true. */
   held?: boolean;
+  /** Phase 2 후속: 보류 사유 — 원문 대조 위반 종류(number/status/entity). */
+  holdKinds?: string[];
 };
 
 /** Phase 1 하드 게이트 범주 — 적중하면 등급 거버너와 무관하게 [중요] 보장. */
@@ -55,6 +57,32 @@ export type HardGate = "supply-chain" | "malware" | "cve" | "outage" | "price-to
 
 /** 사실의 확정 상태. claim/allegation은 제목·시사점에서 사실로 단정하면 안 된다. */
 export type FactStatus = "confirmed" | "claim" | "allegation";
+
+/**
+ * Phase 1 Pass 1 산출물 — 사실 카드.
+ * 등급·제목·시사점은 여기서 확정하지 않는다. Pass 2는 이 카드와 원문만으로 쓴다.
+ */
+/** Phase 2 후속 (섀도 전용): Pass 1이 함께 산출하는 사건 유형 6종.
+ *  등급 결정에는 사용하지 않는다 — decideGrade의 현행 AND 게이트가 유지된다.
+ *  150건이 쌓인 뒤에야 활성화 판정이 가능하다. */
+export type EventType =
+  | "product"
+  | "infra"
+  | "investment"
+  | "regulation"
+  | "security"
+  | "research";
+
+/** Phase 2 후속 (섀도 전용): 사건이 실무에 미치는 구체적 영향 종류.
+ *  투자액 자체, 사건 유형 해당 자체만으로는 여기에 넣지 않는다 (프롬프트 지시). */
+export type ImpactBasis = "usability" | "cost" | "supply" | "scope" | "legal" | "security";
+
+/** Phase 2 후속 (섀도 전용): 승격 티어. A는 즉시 후보, B는 섀도 결과 뒤
+ *  플래그로 활성화하는 보류 후보 (랩 밖 GA 출시·대형 배포·주 단위 법 서명·
+ *  투자 1억~10억 달러). 투자액 규모·주 단위 규제의 코드 단위 분리는
+ *  150건 리뷰 과제로 남겨두고, 본 개정에서는 제품의 프런티어 여부만으로
+ *  B를 가린다 (그 외 사건은 A로 기록). */
+export type ShadowTier = "A" | "B";
 
 /**
  * Phase 1 Pass 1 산출물 — 사실 카드.
@@ -82,6 +110,10 @@ export type FactCard = {
   immediate: boolean;
   tip: boolean;
   topics: string[];
+  /** Phase 2 후속 (섀도 전용): 사건 유형. 없으면 null. */
+  eventType?: EventType | null;
+  /** Phase 2 후속 (섀도 전용): 구체적 영향 종류 목록. 없으면 []. */
+  impactBasis?: ImpactBasis[];
 };
 
 /**
@@ -135,6 +167,110 @@ export type CollectStats = {
   govSignal?: string;
   /** Phase 1: 원문 대조 검증 실패로 보류된 건수 (dropKeepFalse의 부분집합). */
   deskHeld?: number;
+  /** Phase 2 후속: kept 중 이미 DB에 있는 URL을 뺀 신규 후보 수 (kept − dropAlreadyInDb).
+   *  다단계 선택은 전량을 검토하므로(조기 종료 없음) 이 값은 정확하다. */
+  keptNew?: number;
+  /** Phase 2 후속: 소스캡에 걸려 드레인 풀에 들어간 후보 수 (중복 제거 전 집계 기준 아님 — 풀 규모). */
+  drainCandidates?: number;
+  /** Phase 2 후속: 드레인으로 배치에 들어간 건수. */
+  drainBatch?: number;
+  /** Phase 2 후속: 드레인 레인에서 실제 편입된 건수. */
+  drainInserted?: number;
+  /** Phase 2 후속: tipLane 예약 슬롯으로 배치에 들어간 건수. */
+  tipSlotBatch?: number;
+  /** Phase 2 후속: tipLane 예약 슬롯에서 실제 편입된 건수. */
+  tipSlotInserted?: number;
+  /** Phase 2 후속: 저빈도(METR·Alignment Forum) 공유 슬롯으로 배치에 들어간 건수. */
+  lowFreqBatch?: number;
+  /** Phase 2 후속: 저빈도 공유 슬롯에서 실제 편입된 건수. */
+  lowFreqInserted?: number;
+  /** Phase 2 후속: 일반 22슬롯이 차서 반환 대기열에 들어간 건수 (반환 전 규모). */
+  generalWaitlist?: number;
+  /** Phase 2 후속: 배치 상한(24건)으로 편입되지 못한 검토済 후보 수.
+   *  항등식: kept = inDb + cap + batchCap + similar + batchFull + batch. */
+  dropBatchFull?: number;
+  /** Phase 2 후속: 수집 규칙 버전 (규칙 변경 시 올린다). */
+  ruleVersion?: string;
+  /** Phase 2 후속: Pass 1·2에 쓴 LLM 모델명 (없으면 null). */
+  model?: string | null;
+};
+
+/** Phase 2 후속: 소스별 단계 카운터. kept_new와 함께 ingest_runs 행에
+ *  bySource JSON으로 남는다 (회차당 약 2KB). fetched·kept는 pullRss가,
+ *  나머지는 배치·분류·편입 단계가 채운다. */
+export type SourceStageCounts = {
+  fetched: number;
+  kept: number;
+  inDb: number;
+  cap: number;
+  batchCap: number;
+  similar: number;
+  batch: number;
+  scored: number;
+  inserted: number;
+  drain: number;
+};
+
+/** Phase 2 후속: Pass 1 건별 기록 (배치 진입 기사만). importance는 원값으로
+ *  남긴다 — 버킷은 조회 시 파생한다 (69/70 경계 정보 손실 방지).
+ *  shadowGrade는 등급 결정에 쓰지 않는다 (150건 누적 뒤 활성화 판정용). */
+export type ScoredEntry = {
+  /** URL 해시 (sha1 앞 12자리). 본문·제목 원문은 저장하지 않는다. */
+  hash: string;
+  /** 원문 제목 해시 (sha1 앞 12자리). */
+  titleHash: string;
+  source: string;
+  sourceId?: string;
+  importance: number | null;
+  tip: boolean;
+  eventType: EventType | null;
+  impactBasis: ImpactBasis[];
+  /** Pass 1 evidence(원문 인용)가 비어 있지 않은지. 원문 근거 필수 조건. */
+  hasEvidence: boolean;
+  /** 기존 신호 판정 (hasStrongSignal — 최종 제목·시사점·원제목 기준). */
+  strongSignal: boolean;
+  /** 섀도 티어. 사건 유형이 없으면 "none". */
+  shadowTier: ShadowTier | "none";
+  /** 티어 A만 활성화했을 때의 섀도 등급 (hardGate분은 important로 미러링). */
+  shadowGrade: Grade;
+  /** 티어 A만 활성화했을 때 승격 여부 (shadowGrade와 동일 정보의 불리언형). */
+  promotesA: boolean;
+  /** 티어 A+B를 모두 활성화했을 때 승격 여부. 티어 B 자격 충족분은
+   *  shadowGrade가 note여도 promotesAB가 true라 사후 구분이 된다. */
+  promotesAB: boolean;
+  /** 거버너 적용 후 최종 등급. */
+  grade: Grade;
+  /** 배치 진입 레인. */
+  lane: "general" | "tip" | "lowfreq" | "drain";
+  /** 원문 대조 검증 실패 보류 여부. */
+  held: boolean;
+  /** 보류 사유 (number/status/entity). */
+  holdKinds: string[];
+};
+
+/** Phase 2 후속: 건별 탈락 원장 행. URL·제목은 해시만 남긴다.
+ *  같은 URL은 upsert로 1행 유지 (first_seen 유지, last_seen·seen_count 갱신). */
+export type DropLedgerRow = {
+  urlHash: string;
+  titleHash: string;
+  source: string;
+  sourceId?: string;
+  publishedAt: number;
+  lastStage:
+    | "sourceCap"
+    | "batchSourceCap"
+    | "similar"
+    | "keepFalse"
+    | "newCap"
+    | "insertFail"
+    | "batchFull";
+  similarId?: string | null;
+};
+
+/** Phase 2 후속: 회차 상세 (POST 응답·ingest_runs 행에 함께 남는다). */
+export type CollectDetail = {
+  bySource: Record<string, SourceStageCounts>;
+  scored: ScoredEntry[];
 };
 
 export type CollectResult = {
@@ -147,6 +283,8 @@ export type CollectResult = {
   lastRunAt: number | null;
   /** Phase 0 계측. 수집이 실제 실행된 경우에만 포함된다. */
   stats?: CollectStats;
+  /** Phase 2 후속: 소스별 맵 + Pass 1 건별 기록. */
+  detail?: CollectDetail;
 };
 
 export type IngestRun = {
@@ -158,6 +296,12 @@ export type IngestRun = {
   inserted: number;
   skipped: number;
   note?: string;
+  /** Phase 2 후속: 회차 상세 (ingest_runs 행의 stats·by_source·scored 컬럼). */
+  stats?: CollectStats;
+  bySource?: Record<string, SourceStageCounts>;
+  scored?: ScoredEntry[];
+  ruleVersion?: string;
+  model?: string | null;
 };
 
 export type FeedPayload = {
