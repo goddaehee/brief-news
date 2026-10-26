@@ -1,5 +1,15 @@
 import { TOPIC_MAP } from "./topics";
-import type { FactCard, FactStatus, Grade, HardGate, IngestPayload, NewsItem } from "./types";
+import type {
+  EventType,
+  FactCard,
+  FactStatus,
+  Grade,
+  HardGate,
+  ImpactBasis,
+  IngestPayload,
+  NewsItem,
+  ShadowTier,
+} from "./types";
 
 export const ALLOWED_TOPICS = Object.keys(TOPIC_MAP);
 
@@ -111,6 +121,20 @@ export const FACT_SYSTEM = `당신은 한국 AI 실무자용 뉴스 터미널 br
   - 30~49: 단신·홍보성 — 벤더 자체 역량·수치 홍보, 하드웨어 액세서리, 의견·전망 기사.
   - 0~29: 실무 무관에 가까움.
 - promotionReason: [중요] 후보라고 보는 근거 한 줄. 해당 없으면 빈 문자열.
+- eventType: 사건 유형 6종 중 하나, 해당 없으면 null. 등급 결정에는 쓰지 않는
+  섀도 기록용이다 (150건 누적 뒤에야 활성화 판정이 가능하다).
+  - "product": 제품·모델 출시/도입 (신모델·신제품·기능 출시).
+  - "infra": 인프라·공급 (컴퓨팅 용량·데이터센터·공급 능력 변화).
+  - "investment": 투자·인수·계약 (금액·지분·계약 체결).
+  - "regulation": 규제·법안·제재 (법안·정책·가이드라인·제재 발표).
+  - "security": 보안·장애 (취약점·침해·악성코드·서비스 장애).
+  - "research": 연구·평가 (논문·벤치마크·평가 결과).
+- impactBasis: 이 사건이 실무에 미치는 구체적 영향 1개 이상, 아래 허용값만.
+  허용값: "usability"(오늘 바로 쓸 수 있음), "cost"(비용·가격·요금 변화),
+  "supply"(공급 능력·용량·가용성 변화), "scope"(적용 범위·대상·지역 변화),
+  "legal"(법적 의무·컴플라이언스 변화), "security"(보안 위험·대응 변화).
+  투자액 자체, 사건 유형 해당 자체만으로는 impactBasis에 넣지 말 것.
+  규제 사건은 상태(발의·통과·서명·시행)를 change에 명시할 것.
 - hardGate: 아래 범주에 정확히 해당하면 그 값, 아니면 null.
   - "supply-chain": 패키지·모델·데이터셋 공급망 공격 (악성 패키지 배포, 백도어 삽입 등).
   - "malware": 악성코드·랜섬웨어·침해 도구 자체가 주제인 사건.
@@ -139,8 +163,10 @@ export function factUser(entry: {
 발췌: ${entry.summary.slice(0, 700)}
 
 JSON 스키마:
-{"keep":true,"status":"confirmed|claim|allegation","entities":["원문 표기 그대로"],"hangulForms":["등록 표기가 있는 이름의 한글 표기만"],"change":"변경점 한 줄","numbers":["원문 수치 그대로"],"evidence":"원문 근거 구절 인용","importance":0,"promotionReason":"","hardGate":null,"immediate":false,"tip":false,"topics":["openai"]}
+{"keep":true,"status":"confirmed|claim|allegation","entities":["원문 표기 그대로"],"hangulForms":["등록 표기가 있는 이름의 한글 표기만"],"change":"변경점 한 줄","numbers":["원문 수치 그대로"],"evidence":"원문 근거 구절 인용","importance":0,"promotionReason":"","hardGate":null,"immediate":false,"tip":false,"topics":["openai"],"eventType":null,"impactBasis":[]}
 hardGate 허용값: "supply-chain" | "malware" | "cve" | "outage" | "price-today" | null
+eventType 허용값: "product" | "infra" | "investment" | "regulation" | "security" | "research" | null
+impactBasis 허용값: "usability" | "cost" | "supply" | "scope" | "legal" | "security"
 topics 허용값: ${ALLOWED_TOPICS.join(", ")}`;
 }
 
@@ -175,6 +201,20 @@ export function parseFactCard(json: Record<string, unknown>): FactCard | null {
   const hangulForms = Array.isArray(json.hangulForms)
     ? json.hangulForms.filter((x): x is string => typeof x === "string" && registeredForms.has(x)).slice(0, 12)
     : [];
+  // Phase 2 후속 (섀도 전용): eventType은 6종 허용값만, impactBasis는
+  // 허용값만 남긴다. 무효·누락은 null/[]로 — 카드 자체를 거부하지 않는다
+  // (섀도 필드라 Pass 1 본류 판정에 영향을 주지 않는다).
+  const EVENT_TYPES = ["product", "infra", "investment", "regulation", "security", "research"];
+  const IMPACT_BASES = ["usability", "cost", "supply", "scope", "legal", "security"];
+  const eventType =
+    typeof json.eventType === "string" && EVENT_TYPES.includes(json.eventType)
+      ? (json.eventType as EventType)
+      : null;
+  const impactBasis = Array.isArray(json.impactBasis)
+    ? json.impactBasis.filter(
+        (x): x is ImpactBasis => typeof x === "string" && IMPACT_BASES.includes(x),
+      )
+    : [];
   return {
     status,
     entities,
@@ -188,6 +228,8 @@ export function parseFactCard(json: Record<string, unknown>): FactCard | null {
     immediate: json.immediate === true,
     tip: json.tip === true,
     topics,
+    eventType,
+    impactBasis,
   };
 }
 
@@ -483,6 +525,63 @@ export function decideGrade(
     return "important";
   }
   return "note";
+}
+
+/**
+ * Phase 2 후속 — 섀도 승격 판정 (등급 결정에 사용하지 않는다).
+ *
+ * decideGrade·needsRewrite의 현행 AND 게이트는 그대로 두고, 새 신호 체계가
+ * 되었을 때 어떤 기사가 [중요]가 될지를 기록만 한다. 섀도 데이터가 150건
+ * 쌓인 뒤에야 활성화 판정이 가능하다 — 이 함수의 결과가 150건 미만에서
+ * 등급을 바꾸는 일은 없다.
+ *
+ * 승격 요건 (패널 채택): importance ≥ 70 + 확인된 사건(eventType) +
+ * 구체적 영향 근거 1개 이상(impactBasis) + 원문 근거(evidence) 존재.
+ * 투자액 단독·유형 해당 단독은 프롬프트 지시로 impactBasis에서 제외한다
+ * (코드로 검증하지 않는다 — 150건 리뷰에서 검증).
+ * NOTE_FORCE 강등 대상은 섀도에서도 승격하지 않는다.
+ *
+ * 티어: 제품 사건에서 프런티어 랩(FRONTIER_LAB) 주체가 아니면 B.
+ * 투자액 규모(1억~10억 달러)와 주 단위 규제의 코드 단위 분리는 150건
+ * 리뷰 과제로 남긴다 — 본 개정에서는 투자·규제 사건을 A로 기록한다.
+ * hardGate 적중분은 이미 [중요]이므로 섀도 등급을 important로 미러링한다
+ * (신규 승격 집계에서 자동 제외된다).
+ */
+export type ShadowAssessment = {
+  tier: ShadowTier | "none";
+  promotesA: boolean;
+  promotesAB: boolean;
+  shadowGrade: Grade;
+};
+
+export function assessShadow(
+  card: Pick<FactCard, "importance" | "hardGate" | "eventType" | "impactBasis" | "evidence" | "entities">,
+  title: string,
+  takeaway: string,
+  originalTitle = "",
+): ShadowAssessment {
+  if (card.hardGate) {
+    return { tier: "A", promotesA: true, promotesAB: true, shadowGrade: "important" };
+  }
+  const eventType = card.eventType ?? null;
+  if (!eventType) {
+    return { tier: "none", promotesA: false, promotesAB: false, shadowGrade: "note" };
+  }
+  const actorText = `${(card.entities ?? []).join(" ")} ${title} ${originalTitle}`;
+  const tier: ShadowTier =
+    eventType === "product" && !FRONTIER_LAB.test(actorText) ? "B" : "A";
+  const hasImpact =
+    (card.impactBasis ?? []).length > 0 && Boolean(card.evidence && card.evidence.trim());
+  const qualifies =
+    card.importance >= IMPORTANCE_FLOOR &&
+    hasImpact &&
+    !forceNoteReason(title, takeaway);
+  return {
+    tier,
+    promotesA: qualifies && tier === "A",
+    promotesAB: qualifies,
+    shadowGrade: qualifies && tier === "A" ? "important" : "note",
+  };
 }
 
 /** 36차: [중요] 강등 강제 패턴. hasStrongSignal이 true여도 note로 내린다.
