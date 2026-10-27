@@ -48,8 +48,14 @@ export type IngestPayload = {
   secHint?: boolean;
   /** Phase 1: 원문 대조 검증 실패로 보류(keep=false)된 경우 true. */
   held?: boolean;
-  /** Phase 2 후속: 보류 사유 — 원문 대조 위반 종류(number/status/entity). */
+  /** Phase 2 후속: 보류 사유 — 원문 대조 위반 종류(number/status/entity).
+   *  B1: LLM 실패 보류는 "llm-fail", 데드라인 보류는 "deadline"을 쓴다. */
   holdKinds?: string[];
+  /** B1: LLM 미설정 경로의 원문 폴백 페이로드 표시. 이 표시가 있는 페이로드만
+   *  원문 그대로 삽입될 수 있고, 삽입 시 stats.fallbackInserted로 센다. */
+  rawFallback?: boolean;
+  /** B1: 포이즌 가드로 제외된 페이로드 (LLM 실패 보류 3회 누적). */
+  poisoned?: boolean;
 };
 
 /** Phase 1 하드 게이트 범주 — 적중하면 등급 거버너와 무관하게 [중요] 보장. */
@@ -155,10 +161,27 @@ export type CollectStats = {
   dropNewCap: number;
   /** insertItem 실패 */
   dropInsertFail: number;
-  /** 오류로 중단된 부분 집계일 때만 true. 항등식은 정상 완료 실행에서만 성립한다. */
+  /** 오류로 중단된 부분 집계일 때만 true. 항등식은 정상 완료 실행에서만 성립한다.
+   *  B1: 데드라인 부분 성공(status "partial")인 회차도 true로 남긴다. */
   partial?: boolean;
-  /** partial일 때 실패한 단계 (pull/dedupe/batch/classify/insert/finalize) */
+  /** partial일 때 실패한 단계 (pull/dedupe/batch/classify/insert/rewrite/finalize) */
   failedStage?: string;
+  /** B1: 부분 성공 사유 (현재는 "llm-deadline"만). */
+  abortReason?: string;
+  /** B1: 데드라인으로 보류된 건수 (holdKinds에 "deadline" 포함). */
+  heldDeadline?: number;
+  /** B1: LLM 실패로 보류된 건수 (holdKinds에 "llm-fail" 포함). */
+  heldLlmFail?: number;
+  /** B1: 데드라인 abort로 중단됐거나 마감 후 시작되지 못한 LLM 호출 수. */
+  callsAborted?: number;
+  /** B1: 호출 캡(25초·유효 타임아웃)에 걸려 타임아웃된 LLM 호출 수. */
+  callsTimedOut?: number;
+  /** B1: 원문 폴백으로 실제 삽입된 건수. LLM이 설정된 환경에서는 0이어야 한다. */
+  fallbackInserted?: number;
+  /** B1: 포이즌 가드로 제외된 건수 (LLM 실패 보류 3회 누적 URL). */
+  poisonExcluded?: number;
+  /** B1 M6: 회차 시작 시 aborted로 정리한 stale running 행 수. */
+  staleRunsAborted?: number;
   /** Phase 1 거버너: 비율 상한 때문에 [중요]→[참고]로 강등된 건수 (dropKeepFalse와 무관한 부가 정보). */
   govDemoted?: number;
   /** Phase 1 거버너: 이번 배치 편입 후 최근 40건 창의 [중요]급(속보 포함) 비율 (0~1). */
@@ -220,6 +243,19 @@ export type CollectDurations = {
   llmMaxCallMs: number;
   /** 기사 1건 classifyEntry 체인의 최장 소요 (ms). */
   llmMaxChainMs: number;
+  /** B1: 호출별 지연 기록 (체크포인트·종료 시점에 스냅샷). 캡 재결정 표본용. */
+  llmCallLog?: LlmCallLogEntry[];
+};
+
+/** B1: LLM 호출 1건의 지연·결과 기록. key는 기사 URL 해시, pass는 체인 단계. */
+export type LlmCallLogEntry = {
+  key?: string;
+  pass?: string;
+  /** 실제 소요 (ms). 마감 후 시작되지 못한 호출은 0. */
+  ms: number;
+  /** 이 호출에 적용된 유효 타임아웃 (ms) = min(25초, 데드라인 잔여). */
+  timeoutMs: number;
+  outcome: "ok" | "empty" | "timeout" | "aborted" | "deadline";
 };
 
 /** Phase 2 후속: 소스별 단계 카운터. kept_new와 함께 ingest_runs 행에
@@ -290,7 +326,14 @@ export type DropLedgerRow = {
     | "keepFalse"
     | "newCap"
     | "insertFail"
-    | "batchFull";
+    | "batchFull"
+    /** B1: LLM 실패 보류 (포이즌 가드의 llm_fail_count 누적 대상). */
+    | "llmFail"
+    /** B1: 데드라인 보류 — 분류를 완료하지 못한 것이므로 llm_fail_count를
+     *  리셋하지 않고 유지한다 (Codex 재리뷰). */
+    | "deadline"
+    /** B1: 포이즌 가드로 최종 제외. */
+    | "poison";
   similarId?: string | null;
 };
 
@@ -302,7 +345,9 @@ export type CollectDetail = {
 
 export type CollectResult = {
   ok: boolean;
-  status: "ok" | "rate_limited" | "error";
+  /** B1: "partial"은 데드라인으로 일부만 처리했지만 정상 종료한 회차.
+   *  ok:true + HTTP 200이라 크론 성공 판정과 호환된다. */
+  status: "ok" | "partial" | "rate_limited" | "error";
   fetched: number;
   inserted: number;
   skipped: number;
