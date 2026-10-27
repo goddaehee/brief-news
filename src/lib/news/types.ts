@@ -193,6 +193,33 @@ export type CollectStats = {
   ruleVersion?: string;
   /** Phase 2 후속: Pass 1·2에 쓴 LLM 모델명 (없으면 null). */
   model?: string | null;
+  /** S2 계측: 단계별 소요 시간 (관찰 전용 — 선정·등급 로직과 무관). */
+  durations?: CollectDurations;
+};
+
+/** S2 계측: 수집 회차 단계별 소요 시간 (ms). 전부 관찰 전용이며 수집 동작을
+ *  바꾸지 않는다. blockAMs는 pull·rewrite 병렬 블록의 벽시계 시간이라
+ *  pullMs·rewriteMs와 겹친다 (합산 금지). totalMs는 beginRun 직후부터
+ *  finishRun 직전까지 — 락 획득·쿨다운 대기는 포함하지 않는다.
+ *  classifyMs는 분류 웨이브 + 거버너 + 건별 기록 구간을 함께 잰다. */
+export type CollectDurations = {
+  totalMs: number;
+  setupMs: number;
+  blockAMs: number;
+  pullMs: number;
+  rewriteMs: number;
+  dedupeMs: number;
+  batchMs: number;
+  ledeMs: number;
+  classifyMs: number;
+  insertMs: number;
+  finalizeMs: number;
+  /** 회차 중 chatJson 총 호출 수 (재작성 체인 포함). */
+  llmCalls: number;
+  /** 단일 chatJson 호출의 최장 소요 (ms). */
+  llmMaxCallMs: number;
+  /** 기사 1건 classifyEntry 체인의 최장 소요 (ms). */
+  llmMaxChainMs: number;
 };
 
 /** Phase 2 후속: 소스별 단계 카운터. kept_new와 함께 ingest_runs 행에
