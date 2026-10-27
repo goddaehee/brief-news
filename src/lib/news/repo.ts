@@ -75,6 +75,7 @@ create table if not exists drop_ledger (
   similar_id text
 );
 create index if not exists drop_ledger_last_seen_idx on drop_ledger (last_seen);
+alter table drop_ledger add column if not exists llm_fail_count int not null default 0;
 insert into collect_lock (id) values (1) on conflict (id) do nothing
 `;
 
@@ -146,6 +147,9 @@ type MemLedgerRow = DropLedgerRow & {
   firstSeen: number;
   lastSeen: number;
   seenCount: number;
+  /** B1: LLM 실패 보류 전용 누적 (포이즌 가드). seen_count와 분리한다 —
+   *  다른 탈락 사유의 기록까지 LLM 실패로 세는 오작동 방지 (Codex 리뷰). */
+  llmFailCount: number;
 };
 
 type Mem = {
@@ -751,6 +755,99 @@ export async function finishRun(
   }
 }
 
+/**
+ * B1: 단계 체크포인트 — 진행 중 run 행의 stats 스냅샷만 갱신한다.
+ * 플랫폼 강제 종료로 finishRun에 닿지 못해도 마지막 단계의 부분 집계가
+ * 남는다. 호출부는 fail-open(실패 무시)으로 감싼다.
+ */
+export async function updateRunStats(id: number, stats: CollectStats): Promise<void> {
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    // Codex 리뷰: 지연된 체크포인트 쓰기가 finishRun 이후에 도착해 최종
+    // stats를 덮지 않도록, 아직 running인 행만 갱신한다.
+    await sql(`update ingest_runs set stats = $2 where id = $1 and status = 'running'`, [
+      id,
+      jsonOrNull(stats),
+    ]);
+    return;
+  }
+  const run = mem().runs.find((r) => r.id === id);
+  if (run && run.status === "running") {
+    // 직렬화 왕복으로 스냅샷을 고정한다 (이후 원본 변경이 새지 않게).
+    const snap = jsonOrNull(stats);
+    run.stats = snap ? (JSON.parse(snap) as CollectStats) : undefined;
+  }
+}
+
+/**
+ * B1 M6: 강제 종료로 남은 stale running 행을 aborted로 마감한다.
+ * 수집 락을 보유한 회차 시작 직후에만 호출한다 — 동시 실행 중인 정상
+ * 회차의 행을 건드리지 않기 위해서다. cutoff보다 오래된 running만 대상.
+ */
+export async function abortStaleRuns(cutoffMs: number): Promise<number> {
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    const rows = await sql(
+      `update ingest_runs set status = 'aborted', finished_at = now(),
+              note = coalesce(note, 'stale running — B1 M6 정리')
+        where status = 'running' and finished_at is null and started_at < $1
+        returning id`,
+      [new Date(cutoffMs).toISOString()],
+    );
+    return rows.length;
+  }
+  const m = mem();
+  let n = 0;
+  for (const run of m.runs) {
+    if (run.status === "running" && !run.finishedAt && run.startedAt < cutoffMs) {
+      run.status = "aborted";
+      run.finishedAt = Date.now();
+      run.note = run.note ?? "stale running — B1 M6 정리";
+      n += 1;
+    }
+  }
+  return n;
+}
+
+/**
+ * B1: 포이즌 가드용 원장 조회 — URL 해시별 (seen_count, last_stage).
+ * 없는 해시는 맵에 없다. 호출부는 fail-open으로 감싼다.
+ */
+export async function getDropLedgerSeen(
+  urlHashes: string[],
+): Promise<Map<string, { seenCount: number; lastStage: string; llmFailCount: number }>> {
+  const out = new Map<string, { seenCount: number; lastStage: string; llmFailCount: number }>();
+  if (urlHashes.length === 0) return out;
+  await ensureSchema();
+  if (hasDatabaseUrl()) {
+    const sql = getSql();
+    const placeholders = urlHashes.map((_, i) => `$${i + 1}`).join(", ");
+    const rows = await sql(
+      `select url_hash, seen_count, last_stage, llm_fail_count from drop_ledger where url_hash in (${placeholders})`,
+      urlHashes,
+    );
+    for (const row of rows) {
+      out.set(String(row.url_hash), {
+        seenCount: Number(row.seen_count),
+        lastStage: String(row.last_stage),
+        llmFailCount: Number(row.llm_fail_count ?? 0),
+      });
+    }
+    return out;
+  }
+  const m = mem();
+  for (const h of urlHashes) {
+    const row = m.dropLedger.get(h);
+    if (row)
+      out.set(h, {
+        seenCount: row.seenCount,
+        lastStage: row.lastStage,
+        llmFailCount: row.llmFailCount,
+      });
+  }
+  return out;
+}
+
 export async function listRuns(limit = 12): Promise<IngestRun[]> {
   if (hasDatabaseUrl()) {
     const sql = getSql();
@@ -813,18 +910,24 @@ export async function recordDropLedger(rows: DropLedgerRow[]): Promise<void> {
           new Date(r.publishedAt).toISOString(),
           r.lastStage,
           r.similarId ?? null,
+          // B1: llm_fail_count는 신규 행에서 llmFail 기록일 때만 1로 시작한다.
+          r.lastStage === "llmFail" ? 1 : 0,
         );
-        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, now(), now())`;
+        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, now(), now(), $${base + 8})`;
       });
       await sql(
         `insert into drop_ledger
-           (url_hash, title_hash, source, source_id, published_at, last_stage, similar_id, first_seen, last_seen)
+           (url_hash, title_hash, source, source_id, published_at, last_stage, similar_id, first_seen, last_seen, llm_fail_count)
          values ${tuples.join(", ")}
          on conflict (url_hash) do update set
            title_hash = excluded.title_hash, source = excluded.source,
            source_id = excluded.source_id, last_stage = excluded.last_stage,
            similar_id = excluded.similar_id, last_seen = now(),
-           seen_count = drop_ledger.seen_count + 1`,
+           seen_count = drop_ledger.seen_count + 1,
+           llm_fail_count = case
+             when excluded.last_stage = 'llmFail' then drop_ledger.llm_fail_count + 1
+             when excluded.last_stage in ('keepFalse', 'newCap', 'insertFail') then 0
+             else drop_ledger.llm_fail_count end`,
         values,
       );
     }
@@ -842,6 +945,11 @@ export async function recordDropLedger(rows: DropLedgerRow[]): Promise<void> {
       prev.similarId = r.similarId ?? null;
       prev.lastSeen = now;
       prev.seenCount += 1;
+      // B1: DB 경로와 동일 규칙 — llmFail만 누적, 분류 완료 스테이지는 리셋,
+      // 배치 단계·poison 기록은 카운터를 유지한다.
+      if (r.lastStage === "llmFail") prev.llmFailCount += 1;
+      else if (r.lastStage === "keepFalse" || r.lastStage === "newCap" || r.lastStage === "insertFail")
+        prev.llmFailCount = 0;
     } else {
       m.dropLedger.set(r.urlHash, {
         ...r,
@@ -849,6 +957,7 @@ export async function recordDropLedger(rows: DropLedgerRow[]): Promise<void> {
         firstSeen: now,
         lastSeen: now,
         seenCount: 1,
+        llmFailCount: r.lastStage === "llmFail" ? 1 : 0,
       });
     }
   }
@@ -864,7 +973,7 @@ export async function listDropLedger(limit = 50): Promise<MemLedgerRow[]> {
               (extract(epoch from published_at) * 1000) as published_ms,
               (extract(epoch from first_seen) * 1000) as first_ms,
               (extract(epoch from last_seen) * 1000) as last_ms,
-              last_stage, seen_count, similar_id
+              last_stage, seen_count, similar_id, llm_fail_count
          from drop_ledger order by last_seen desc limit $1`,
       [limit],
     );
@@ -879,6 +988,7 @@ export async function listDropLedger(limit = 50): Promise<MemLedgerRow[]> {
       firstSeen: Number(row.first_ms),
       lastSeen: Number(row.last_ms),
       seenCount: Number(row.seen_count),
+      llmFailCount: Number(row.llm_fail_count ?? 0),
     }));
   }
   return [...mem().dropLedger.values()].sort((a, b) => b.lastSeen - a.lastSeen).slice(0, limit);
@@ -920,11 +1030,15 @@ export async function lastRunAt(): Promise<number | null> {
     const rows = await sql(
       `select (extract(epoch from finished_at) * 1000) as ms
          from ingest_runs
-        where status <> 'seed' and finished_at is not null
+        where status <> 'seed' and status <> 'aborted' and finished_at is not null
         order by finished_at desc limit 1`,
     );
     return rows[0]?.ms == null ? null : Number(rows[0].ms);
   }
-  const run = mem().runs.find((r) => r.status !== "seed" && r.finishedAt);
+  // B1: aborted(M6 정리 행)는 실제 수집 완료가 아니므로 lastRunAt에서 제외한다.
+  // partial은 완료 취급이라 포함한다 (확정안 부분 성공 의미론).
+  const run = mem().runs.find(
+    (r) => r.status !== "seed" && r.status !== "aborted" && r.finishedAt,
+  );
   return run?.finishedAt ?? null;
 }
