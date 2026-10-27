@@ -1,5 +1,16 @@
 import { isSeedItem } from "./data";
-import { chatJson, resolveLlm, setLlmMetricsSink, type LlmCallMetrics } from "./llm";
+import {
+  chatJson,
+  createLlmDeadline,
+  llmDeadlineState,
+  resolveLlm,
+  setLlmCallLabel,
+  setLlmDeadline,
+  setLlmMetricsSink,
+  updateLlmCallPass,
+  type LlmCallMetrics,
+  type LlmDeadlineContext,
+} from "./llm";
 import {
   assessShadow,
   buildPayloadFromCard,
@@ -25,11 +36,13 @@ import {
 } from "./sources";
 import { decodeFeedBytes, parseFeedXml, parseNewsMarkdown } from "./parse";
 import {
+  abortStaleRuns,
   beginRun,
   countRecentInsertsBySource,
   deleteItem,
   ensureSeeded,
   finishRun,
+  getDropLedgerSeen,
   getFeedCache,
   hash12,
   insertItem,
@@ -43,6 +56,7 @@ import {
   setFeedCache,
   tryCollectLock,
   updateItem,
+  updateRunStats,
   upsertBriefing,
 } from "./repo";
 import type {
@@ -60,6 +74,52 @@ import type {
 
 /** Phase 2 후속: 수집 규칙 버전. 수집·선택·등급 규칙이 바뀌면 올린다. */
 export const COLLECT_RULE_VERSION = "p2f-1";
+
+/** B1 확정 수치 (improvement-decision.md §2.3·§3 — 임의 변경 금지):
+ *  LLM 마감 47초 / 종료 기한 55초 / 체인 시작 게이트 잔여 10초 / 포이즌 3회. */
+export const LLM_DEADLINE_MS = 47_000;
+export const FINISH_DEADLINE_MS = 55_000;
+/** B1: 종료 기한에서 finishRun(최종 상태 기록)용으로 비워 두는 예비 시간.
+ *  마감 구간 I/O(원장·브리핑·보존 정리)는 이 예비를 침범하지 않게 제한한다. */
+export const FINISH_RESERVE_MS = 5_000;
+export const CHAIN_START_GATE_MS = 10_000;
+export const POISON_HOLD_LIMIT = 3;
+/** B1 M6: running 행 stale 판정 기준 (10분 초과). */
+export const STALE_RUN_MS = 10 * 60 * 1000;
+
+/** B1: 포이즌 판정 — LLM 실패 보류 전용 카운터(llm_fail_count)가 3회
+ *  누적됐거나, 이미 포이즌 제외된 URL인가. seen_count는 모든 탈락 사유가
+ *  섞이는 누적이라 쓰지 않는다 (Codex 리뷰: 사유 혼합 오작동 + poison
+ *  기록이 판정을 해제하는 문제). 한 번 제외되면 원장이 보존되는 동안
+ *  (14일) 제외가 유지되고, 분류가 완료된 회차(keepFalse 등)가 끼면
+ *  카운터가 리셋돼 재진입한다. */
+export function isPoisonedHold(
+  seen: { llmFailCount: number; lastStage: string } | undefined,
+): boolean {
+  if (!seen) return false;
+  return seen.lastStage === "poison" || seen.llmFailCount >= POISON_HOLD_LIMIT;
+}
+
+/** B1: 회차 종료 상태 — 데드라인 보류·호출 중단이 있으면 partial. */
+export function decideRunStatus(s: {
+  heldDeadline?: number;
+  callsAborted?: number;
+}): "ok" | "partial" {
+  return (s.heldDeadline ?? 0) > 0 || (s.callsAborted ?? 0) > 0 ? "partial" : "ok";
+}
+
+/** B1: 데드라인 게이트 — LLM 마감까지 잔여가 게이트(10초) 미만이면 새
+ *  체인·패스를 시작하지 않는다. 데드라인 문맥이 없으면(ingest 경로) 항상 열려 있다. */
+export function deadlineGateClosed(): boolean {
+  const s = llmDeadlineState();
+  return s !== null && s.remainingMs < CHAIN_START_GATE_MS;
+}
+
+/** B1: 방금 실패한 호출의 사유 분류 — 데드라인 중단이면 deadline, 아니면 llm-fail. */
+export function currentFailureKind(): "deadline" | "llm-fail" {
+  const s = llmDeadlineState();
+  return s && (s.aborted || s.remainingMs <= 0) ? "deadline" : "llm-fail";
+}
 
 /** Phase 2 후속: 저빈도 소스 (7일 평균 1건/일 미만 — METR·Alignment Forum).
  *  신선도 6→48시간 + 두 소스 합쳐 회차당 최대 2건의 배치 기회 (편입 보장 없음). */
@@ -253,6 +313,7 @@ export async function collectOnce(): Promise<CollectResult> {
     };
   }
 
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     const last = await lastRunAt();
     if (last && Date.now() - last < COLLECT_COOLDOWN_MS) {
@@ -268,6 +329,17 @@ export async function collectOnce(): Promise<CollectResult> {
     }
 
     const runId = await beginRun();
+    // B1 M6: 이전 회차가 플랫폼 강제 종료로 남긴 stale running 행을 aborted로
+    // 마감한다. 락 보유·쿨다운 통과 직후라 동시 실행 회차와 간섭하지 않는다.
+    let staleAborted = 0;
+    try {
+      staleAborted = await abortStaleRuns(Date.now() - STALE_RUN_MS);
+      if (staleAborted > 0) {
+        console.log(`[collect-m6] stale running ${staleAborted}건을 aborted로 정리`);
+      }
+    } catch {
+      /* 상태 위생 목적 — 실패해도 수집은 계속한다 */
+    }
     // 34차: 제목 재시도 예산은 run 지역 객체로 (전역 변수 초기화 경합 방지 — Codex 재심)
     const retryBudget: RetryBudget = { left: 12 };
     // Phase 0 계측: 단계별 탈락 카운터 (동작 변경 없는 순수 계측)
@@ -279,6 +351,77 @@ export async function collectOnce(): Promise<CollectResult> {
     const llmMetrics: LlmCallMetrics = { calls: 0, maxMs: 0 };
     setLlmMetricsSink(llmMetrics);
     stats.durations = durations;
+    if (staleAborted > 0) stats.staleRunsAborted = staleAborted;
+    // B1: 2단계 데드라인 — LLM 마감은 회차 시작(runStartedAt) +47초.
+    // 마감 타이머가 AbortController를 중단시켜 진행 중 fetch까지 취소한다.
+    // 종료 기한 55초는 이 마감 + 마감 작업 실측(≤6.4초)으로 구조적으로 보장한다.
+    const deadline: LlmDeadlineContext = createLlmDeadline(runStartedAt + LLM_DEADLINE_MS);
+    setLlmDeadline(deadline);
+    deadlineTimer = setTimeout(
+      () => deadline.controller.abort(),
+      Math.max(0, deadline.deadlineAt - Date.now()),
+    );
+    // B1: 단계 체크포인트 — 단계 경계마다 run 행 stats 스냅샷을 갱신한다.
+    // 강제 종료돼도 마지막 단계까지의 부분 집계·호출 기록이 남는다.
+    // 쓰기는 단계당 1회·짧은 타임아웃·fail-open으로 제한한다 (확정안).
+    // Codex 리뷰: 지연된 쓰기가 더 새로운 스냅샷을 덮지 않도록 쓰기를
+    // 체인으로 직렬화하고(스냅샷은 호출 시점에 고정), repo 쪽에서도
+    // running 행만 갱신해 finishRun 이후 도착분을 무효화한다.
+    /** B1: 종료 기한(55초)까지의 잔여. 마감 구간 판정은 이 값을 매번
+     *  새로 계산한다 (한 번 계산한 플래그는 I/O가 기한을 넘기는 경우를
+     *  놓친다 — Codex 3차 리뷰). */
+    const finishRemainingMs = () => runStartedAt + FINISH_DEADLINE_MS - Date.now();
+    /** B1 (Codex 4차 리뷰): 선택 I/O의 대기 자체를 (종료 잔여 − 예비)로
+     *  제한한다. 시작 전 검사만으로는 호출 도중 기한을 넘기는 경우를 못
+     *  막는다. 제한을 넘기면 기다리지 않고 진행한다 — 작업은 백그라운드로
+     *  이어질 수 있고 전부 멱등·best-effort라 안전하다. 제한 안에서 난
+     *  오류는 기존처럼 전파한다. */
+    const FINISH_TIMEOUT = Symbol("finish-timeout");
+    const awaitWithinFinishBudget = async (p: Promise<unknown>): Promise<boolean> => {
+      const waitMs = Math.max(0, finishRemainingMs() - FINISH_RESERVE_MS);
+      if (waitMs <= 0) {
+        p.catch(() => undefined);
+        return false;
+      }
+      const r = await Promise.race([
+        p,
+        new Promise((resolve) => setTimeout(() => resolve(FINISH_TIMEOUT), waitMs)),
+      ]);
+      if (r === FINISH_TIMEOUT) {
+        p.catch(() => undefined);
+        return false;
+      }
+      return true;
+    };
+    let checkpointChain: Promise<unknown> = Promise.resolve();
+    const checkpoint = async (_stage: string) => {
+      durations.totalMs = Date.now() - runStartedAt;
+      durations.llmCalls = llmMetrics.calls;
+      durations.llmMaxCallMs = llmMetrics.maxMs;
+      durations.llmCallLog = deadline.calls.slice();
+      const snap = JSON.parse(JSON.stringify(stats)) as CollectStats;
+      const write = checkpointChain.then(() =>
+        updateRunStats(runId, snap).catch(() => undefined),
+      );
+      checkpointChain = write;
+      // B1 (Codex 재리뷰): 대기는 종료 예비(5초)를 남긴 잔여로 제한한다 —
+      // 기한이 임박하면 기다리지 않고 진행한다. 쓰기 자체는 체인 순서대로
+      // 이어지고, running 가드가 최종 기록을 보호한다.
+      const waitMs = Math.max(
+        0,
+        Math.min(2000, finishRemainingMs() - FINISH_RESERVE_MS),
+      );
+      if (waitMs > 0) {
+        try {
+          await Promise.race([
+            write,
+            new Promise((resolve) => setTimeout(resolve, waitMs)),
+          ]);
+        } catch {
+          /* 체크포인트 실패는 수집을 막지 않는다 */
+        }
+      }
+    };
     // S2 계측: 단계 시작 시각 (0 = 미진입). 실패한 단계의 소요를 catch에서
     // 채우기 위해 지역 let으로 둔다 (Codex 리뷰 반영).
     let blockAStartedAt = 0;
@@ -295,6 +438,8 @@ export async function collectOnce(): Promise<CollectResult> {
     let fetched = 0;
     let inserted = 0;
     let skipped = 0;
+    // B1 M3-lite: 재작성은 삽입 뒤에서 채운다 (블록A 병렬 실행에서 이동).
+    let rewritten = 0;
 
     try {
       const existing = await listNews();
@@ -312,34 +457,23 @@ export async function collectOnce(): Promise<CollectResult> {
         bySource.set(name, c);
         return c;
       };
-      // rewriteStale과 pullRss는 독립적이므로 병렬 실행 (Vercel 60초 제한 대응)
-      // S2 계측: 블록 전체 벽시계(blockAMs)와 각 갈래 소요를 따로 잰다.
-      // 갈래 소요는 finally로 남긴다 — 한쪽이 실패해도 다른 쪽 기록이 남고,
-      // 실패한 갈래도 실패 시점까지의 경과가 기록된다.
+      // B1 M3-lite: 재작성(rewriteStale)은 블록A 병렬에서 빼서 삽입 뒤로
+      // 옮겼다 — 긴 재작성 회차가 분류 예산을 잠식하던 경로(17:00 회차
+      // rewrite 15.4초)를 끊는다. 블록A는 이제 pull 단독이며 blockAMs는
+      // pullMs와 같아진다. rewriteMs는 삽입 뒤 실행 지점에서 잰다.
       blockAStartedAt = Date.now();
       durations.setupMs = blockAStartedAt - runStartedAt;
-      const [rewritten, entries] = await Promise.all([
-        (async () => {
-          rewriteStartedAt = Date.now();
-          try {
-            return await rewriteStale(existing, retryBudget, durations);
-          } finally {
-            durations.rewriteMs = Date.now() - rewriteStartedAt;
-            rewriteStartedAt = 0; // 완료 표시 — catch의 미완료 채움과 구분
-          }
-        })(),
-        (async () => {
-          pullStartedAt = Date.now();
-          try {
-            return await pullRss(stats, bySource);
-          } finally {
-            durations.pullMs = Date.now() - pullStartedAt;
-            pullStartedAt = 0;
-          }
-        })(),
-      ]);
+      pullStartedAt = Date.now();
+      let entries: RawEntry[];
+      try {
+        entries = await pullRss(stats, bySource);
+      } finally {
+        durations.pullMs = Date.now() - pullStartedAt;
+        pullStartedAt = 0;
+      }
       durations.blockAMs = Date.now() - blockAStartedAt;
       blockAStartedAt = 0;
+      await checkpoint("pull");
       statsStage = "dedupe";
       // rewriteStale이 삭제/업데이트했을 수 있으므로 최신 피드로 다시 조회 후 중복 정리 (P2)
       dedupeStartedAt = Date.now();
@@ -348,7 +482,10 @@ export async function collectOnce(): Promise<CollectResult> {
       dedupeStartedAt = 0;
       batchStartedAt = Date.now();
       fetched = entries.length;
-      const newCap = rewritten > 0 ? Math.min(5, COLLECT_MAX_NEW) : COLLECT_MAX_NEW;
+      // B1 M3-lite: 재작성이 삽입 뒤로 이동해 이번 회차 재작성 건수를 편입
+      // 상한에 결합할 수 없다. 상한은 AGENTS.md 문서값(신규 최대 6건)으로
+      // 고정하고, 회차 총작업량은 데드라인이 bound한다.
+      const newCap = COLLECT_MAX_NEW;
       // 중복 체크는 전체 URL Set으로 (순차 DB 왕복 제거). existingItems(200건 창)는
       // 유사도 검사·sourceCounts·거버너 용도로만 현행 유지한다.
       const existingUrls = new Set(allSourceUrls);
@@ -684,6 +821,24 @@ export async function collectOnce(): Promise<CollectResult> {
       stats.batch = fresh.length;
       durations.batchMs = Date.now() - batchStartedAt;
       batchStartedAt = 0;
+      // B1 포이즌 가드: LLM 실패 보류가 3회 누적된 URL은 분류 예산을 다시
+      // 태우지 않고 제외로 종결한다 (원문 삽입 종착지는 프로젝트 규칙과
+      // 충돌해 확정안에서 배제됐다). 원장 조회 실패 시 가드 없이 진행한다.
+      let poisonedUrls = new Set<string>();
+      try {
+        const seen = await getDropLedgerSeen(fresh.map((e) => hash12(e.sourceUrl)));
+        poisonedUrls = new Set(
+          fresh
+            .filter((e) => isPoisonedHold(seen.get(hash12(e.sourceUrl))))
+            .map((e) => e.sourceUrl),
+        );
+      } catch {
+        /* fail-open — 가드는 최적화이지 수집의 전제가 아니다 */
+      }
+      if (poisonedUrls.size > 0) {
+        console.log(`[collect-poison] LLM 실패 보류 3회 누적 ${poisonedUrls.size}건 제외`);
+      }
+      await checkpoint("batch");
 
       // P0-1: summary가 빈 fresh 후보는 기사 본문 첫 ~500자를 발췌해 보강 (제목만 보고 keep=false 탈락 방지)
       ledeStartedAt = Date.now();
@@ -699,8 +854,18 @@ export async function collectOnce(): Promise<CollectResult> {
 
       statsStage = "classify";
       classifyStartedAt = Date.now();
-      const classified = await Promise.all(
-        fresh.map((entry) => timedClassifyEntry(entry, retryBudget, durations)),
+      // B1: 웨이브를 allSettled로 — 한 체인의 예외가 회차 전체를 죽이지
+      // 않게 하고, 거부된 체인은 LLM 실패 보류로 종결한다. 포이즌 URL은
+      // 분류 자체를 시작하지 않는다.
+      const settled = await Promise.allSettled(
+        fresh.map((entry) =>
+          poisonedUrls.has(entry.sourceUrl)
+            ? Promise.resolve(poisonPayload(entry))
+            : timedClassifyEntry(entry, retryBudget, durations),
+        ),
+      );
+      const classified = settled.map((r, i) =>
+        r.status === "fulfilled" ? r.value : llmFailureHold(fresh[i], "llm-fail"),
       );
       // Phase 1: 등급 거버너 — 편입 대상에 최근 40건 비율 12~18% 적용.
       // 비율 이탈은 govSignal로만 남긴다 (자동 강등은 상한 초과 일반 승격분 한정).
@@ -713,8 +878,21 @@ export async function collectOnce(): Promise<CollectResult> {
           `[desk-governor] demoted=${gov.demoted} shareAfter=${gov.shareAfter.toFixed(3)}${gov.signal ? ` signal=${gov.signal}` : ""}`,
         );
       }
-      const heldCount = classified.filter((p) => p.held).length;
-      if (heldCount > 0) stats.deskHeld = heldCount;
+      // B1: 보류를 사유별로 분리한다. deskHeld는 기존 의미(원문 대조 위반
+      // number/status/entity)만 유지하고, LLM 실패·데드라인은 별도 카운터로.
+      const holdKindsOf = (p: IngestPayload) => p.holdKinds ?? [];
+      const violationHeld = classified.filter(
+        (p) =>
+          p.held &&
+          holdKindsOf(p).some((k) => k === "number" || k === "status" || k === "entity"),
+      ).length;
+      if (violationHeld > 0) stats.deskHeld = violationHeld;
+      stats.heldDeadline = classified.filter(
+        (p) => p.held && holdKindsOf(p).includes("deadline"),
+      ).length;
+      stats.heldLlmFail = classified.filter(
+        (p) => p.held && holdKindsOf(p).includes("llm-fail"),
+      ).length;
       // Phase 2 후속: Pass 1 건별 기록 (등급 결정에는 쓰지 않는 섀도 포함).
       // importance는 원값, 버킷은 조회 시 파생한다. grade는 거버너 적용 후 값.
       const scored: ScoredEntry[] = classified.map((payload, i) => {
@@ -748,10 +926,14 @@ export async function collectOnce(): Promise<CollectResult> {
       // S2 계측: classifyMs는 분류 웨이브 + 거버너 + 건별 기록 구간까지다.
       durations.classifyMs = Date.now() - classifyStartedAt;
       classifyStartedAt = 0;
+      await checkpoint("classify");
       stats.ruleVersion = COLLECT_RULE_VERSION;
       stats.model = resolveLlm()?.model ?? null;
       statsStage = "insert";
       insertStartedAt = Date.now();
+      // B1: 0도 명시적으로 남긴다 (부재와 0을 구분해 폴백 소멸을 검증 가능하게).
+      stats.fallbackInserted = 0;
+      stats.poisonExcluded = 0;
       for (let i = 0; i < classified.length; i++) {
         const payload = classified[i];
         const entry = fresh[i];
@@ -764,10 +946,26 @@ export async function collectOnce(): Promise<CollectResult> {
           lastStage: stage,
           similarId: null,
         });
+        if (payload.poisoned) {
+          skipped += 1;
+          stats.poisonExcluded = (stats.poisonExcluded ?? 0) + 1;
+          ledgerPush(dropRow("poison"));
+          continue;
+        }
         if (payload.keep === false) {
           skipped += 1;
           stats.dropKeepFalse += 1;
-          ledgerPush(dropRow("keepFalse"));
+          // B1: 보류 사유별로 원장 스테이지를 가른다 — LLM 실패는 llmFail
+          // (포이즌 누적), 데드라인은 deadline (분류 미완료라 카운터 유지),
+          // 그 외(위반 보류·LLM 탈락 판정)는 기존 keepFalse로 종결한다.
+          const kinds = payload.holdKinds ?? [];
+          const stage =
+            payload.held && kinds.includes("llm-fail")
+              ? "llmFail"
+              : payload.held && kinds.includes("deadline")
+                ? "deadline"
+                : "keepFalse";
+          ledgerPush(dropRow(stage));
           continue;
         }
         // P0-2: 분류 뒤 컷오프 — keep=true 중 상위 newCap건만 편입 (entries는 byDeskPriority 정렬 순서 유지)
@@ -780,6 +978,10 @@ export async function collectOnce(): Promise<CollectResult> {
         const ok = await insertItem(payload);
         if (ok) {
           inserted += 1;
+          // B1: 원문 폴백 삽입 계수 (LLM 설정 환경에서는 0 유지가 성공 지표).
+          if (payload.rawFallback) {
+            stats.fallbackInserted = (stats.fallbackInserted ?? 0) + 1;
+          }
           srcCounts(payload.source).inserted += 1;
           if (entry.lane === "drain") stats.drainInserted = (stats.drainInserted ?? 0) + 1;
           if (entry.lane === "tip") stats.tipSlotInserted = (stats.tipSlotInserted ?? 0) + 1;
@@ -793,32 +995,77 @@ export async function collectOnce(): Promise<CollectResult> {
 
       durations.insertMs = Date.now() - insertStartedAt;
       insertStartedAt = 0;
+      await checkpoint("insert");
+      // B1 M3-lite: 재작성을 삽입 뒤로 이동. 같은 데드라인·게이트가 적용돼
+      // 잔여 예산 안에서만 돌고, 미완료분은 DB 상태(needsRewrite)에서 다음
+      // 회차에 그대로 재도출된다 (멱등). 재작성 체인도 체크포인트 이후라
+      // 여기서 죽어도 삽입분과 체크포인트는 남는다.
+      statsStage = "rewrite";
+      rewriteStartedAt = Date.now();
+      const rewriteHolds: RewriteHoldSink = { deadline: 0, llmFail: 0 };
+      try {
+        rewritten = await rewriteStale(existing, retryBudget, durations, rewriteHolds);
+      } finally {
+        durations.rewriteMs = Date.now() - rewriteStartedAt;
+        rewriteStartedAt = 0;
+      }
+      // B1 (Codex 리뷰): 재작성 보류도 partial 판정·노트에 합산한다.
+      if (rewriteHolds.deadline > 0) {
+        stats.heldDeadline = (stats.heldDeadline ?? 0) + rewriteHolds.deadline;
+      }
+      if (rewriteHolds.llmFail > 0) {
+        stats.heldLlmFail = (stats.heldLlmFail ?? 0) + rewriteHolds.llmFail;
+      }
+      await checkpoint("rewrite");
+      // B1: 원장 기록은 포이즌 가드의 입력이라 종료 기한 전에 먼저 남긴다
+      // (best-effort — 실패해도 수집 결과는 유지한다). 대기는 종료 예비를
+      // 남긴 잔여로 제한한다 — 넘기면 기다리지 않고 종료 기록을 우선한다
+      // (쓰기 자체는 백그라운드에서 이어질 수 있다. Codex 3차 리뷰).
+      const ledgerWrite = recordDropLedger(ledgerRows).catch((err) => {
+        console.log(`[collect-ledger] 원장 기록 실패 (무시): ${err instanceof Error ? err.message : "unknown"}`);
+      });
+      await awaitWithinFinishBudget(ledgerWrite);
       statsStage = "finalize";
       finalizeStartedAt = Date.now();
-      if (inserted > 0 || rewritten > 0 || deduped > 0) await refreshBriefing();
+      // B1 (Codex 재리뷰): 종료 기한(55초) 강제 — 잔여가 종료 예비 이하이면
+      // 하우스키핑(브리핑 갱신·보존 정리)을 생략하고 finishRun(최종 상태
+      // 기록)을 우선해, 플랫폼 강제 종료 전에 회차가 기록을 남기게 한다.
+      // 판정은 각 단계 직전에 잔여를 새로 계산한다.
+      if (finishRemainingMs() <= FINISH_RESERVE_MS) {
+        console.log("[collect-deadline] 종료 기한 임박 — 브리핑·보존 정리를 생략하고 종료 기록을 우선");
+      } else if (inserted > 0 || rewritten > 0 || deduped > 0) {
+        // 대기 자체도 잔여로 제한한다 (시작 전 검사만으로는 부족 — Codex 4차).
+        await awaitWithinFinishBudget(refreshBriefing());
+      }
 
-      const note =
+      let note =
         inserted > 0 || rewritten > 0 || deduped > 0
           ? `RSS ${fetched}건 중 ${inserted}건 편성${rewritten ? ` · ${rewritten}건 재작성` : ""}${deduped ? ` · ${deduped}건 중복 정리` : ""}${resolveLlm() ? "" : " · LLM 키 없음(원문 폴백)"}`
           : fetched === 0
             ? "RSS를 가져오지 못했습니다. 네트워크 또는 피드 주소를 확인하세요."
             : "새 소식이 없거나 모두 중복입니다.";
+      if ((stats.heldDeadline ?? 0) > 0) {
+        note += ` · 시간 예산으로 ${stats.heldDeadline}건 보류(다음 회차 재분류)`;
+      }
+      if ((stats.heldLlmFail ?? 0) > 0) {
+        note += ` · LLM 실패 ${stats.heldLlmFail}건 보류(다음 회차 재분류)`;
+      }
 
       // Phase 0 계측: 단계별 카운터를 구조화 로그로 남긴다 (Vercel 함수 로그).
       console.log(`[collect-stats] ${JSON.stringify(stats)}`);
-      // Phase 2 후속: 원장·보존 정책은 best-effort — 실패해도 수집 결과는 유지한다.
       const detail: CollectDetail = {
         bySource: Object.fromEntries(bySource),
         scored,
       };
       try {
-        await recordDropLedger(ledgerRows);
-      } catch (err) {
-        console.log(`[collect-ledger] 원장 기록 실패 (무시): ${err instanceof Error ? err.message : "unknown"}`);
-      }
-      try {
-        await pruneDropLedger(Date.now() - 14 * 24 * 3600 * 1000);
-        await pruneOldRuns(Date.now() - 90 * 24 * 3600 * 1000);
+        // B1: 보존 정리는 건마다 잔여를 새로 검사하고 대기를 제한한다
+        // (첫 번째 정리가 예비를 침범해도 두 번째가 따라 실행되지 않게).
+        if (finishRemainingMs() > FINISH_RESERVE_MS) {
+          await awaitWithinFinishBudget(pruneDropLedger(Date.now() - 14 * 24 * 3600 * 1000));
+        }
+        if (finishRemainingMs() > FINISH_RESERVE_MS) {
+          await awaitWithinFinishBudget(pruneOldRuns(Date.now() - 90 * 24 * 3600 * 1000));
+        }
       } catch {
         /* 보존 정리 실패는 무시 */
       }
@@ -828,8 +1075,20 @@ export async function collectOnce(): Promise<CollectResult> {
       durations.totalMs = Date.now() - runStartedAt;
       durations.llmCalls = llmMetrics.calls;
       durations.llmMaxCallMs = llmMetrics.maxMs;
+      // B1: 호출 결과 집계 + 부분 성공 판정. partial도 ok:true·완료 취급이라
+      // lastRunAt·쿨다운은 정상 회차와 같고, 집계만 분리된다 (확정안).
+      durations.llmCallLog = deadline.calls.slice();
+      stats.callsAborted = deadline.calls.filter(
+        (c) => c.outcome === "aborted" || c.outcome === "deadline",
+      ).length;
+      stats.callsTimedOut = deadline.calls.filter((c) => c.outcome === "timeout").length;
+      const runStatus = decideRunStatus(stats);
+      if (runStatus === "partial") {
+        stats.partial = true;
+        stats.abortReason = "llm-deadline";
+      }
       await finishRun(runId, {
-        status: "ok",
+        status: runStatus,
         fetched,
         inserted,
         skipped,
@@ -844,7 +1103,7 @@ export async function collectOnce(): Promise<CollectResult> {
       });
       return {
         ok: true,
-        status: "ok",
+        status: runStatus,
         fetched,
         inserted,
         skipped,
@@ -861,6 +1120,8 @@ export async function collectOnce(): Promise<CollectResult> {
       durations.totalMs = Date.now() - runStartedAt;
       durations.llmCalls = llmMetrics.calls;
       durations.llmMaxCallMs = llmMetrics.maxMs;
+      // B1: 오류 스냅샷에도 호출 기록을 동봉한다.
+      durations.llmCallLog = deadline.calls.slice();
       // S2 계측 (Codex 리뷰): 진행 중이던 단계는 시작 시각부터의 경과로 채우고,
       // durations는 복사본으로 고정한다 — Promise.all의 다른 갈래가 계속
       // 실행돼 원본을 바꿔도 로그·응답의 스냅샷은 변하지 않는다.
@@ -909,6 +1170,8 @@ export async function collectOnce(): Promise<CollectResult> {
       };
     }
   } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    setLlmDeadline(null);
     setLlmMetricsSink(null);
     await releaseCollectLock(owner);
   }
@@ -1318,10 +1581,14 @@ function sharesTopicAnchor(a: string, b: string, da?: number, db?: number): bool
   return common.some((t) => /^(a16z|[a-z]{3,})$/.test(t));  // 36차 실측 후속: a16z만 예외 (32차 sk·hbm4 가드 유지)
 }
 
-async function rewriteStale(
+/** B1: 재작성 경로의 LLM 실패·데드라인 보류 건수 싱크 (partial 집계용). */
+export type RewriteHoldSink = { deadline: number; llmFail: number };
+
+export async function rewriteStale(
   existing: Awaited<ReturnType<typeof listNews>>,
   budget?: RetryBudget,
   durations?: CollectDurations,
+  holdSink?: RewriteHoldSink,
 ): Promise<number> {
   if (!resolveLlm()) return 0;
   // 24차 P0: 오타/파편을 일반 stale보다 먼저 처리 — "앤스로픽"이 3라운드 정체된 원인.
@@ -1350,6 +1617,20 @@ async function rewriteStale(
         date: item.publishedAt,
         summary: item.summary,
       }, budget, durations);
+      // B1: LLM 실패·데드라인 보류는 삭제도 갱신도 하지 않는다 — 기존 글을
+      // 그대로 두고 다음 회차 재도출에 맡긴다 (LLM 스톨이 기존 글 삭제로
+      // 번지는 것 방지). 보류 건수는 싱크로 회차 통계(partial 판정)에 합산한다.
+      // 원문 대조 위반 보류는 B1 이전과 동일하게 아래 삭제 경로를 탄다.
+      if (payload.held) {
+        const kinds = payload.holdKinds ?? [];
+        if (kinds.includes("deadline") || kinds.includes("llm-fail")) {
+          if (holdSink) {
+            if (kinds.includes("deadline")) holdSink.deadline += 1;
+            else holdSink.llmFail += 1;
+          }
+          return 0;
+        }
+      }
       if (payload.keep === false) {
         return (await deleteItem(item.id)) ? 1 : 0;
       }
@@ -1613,7 +1894,20 @@ async function writeFromCard(
   card: FactCard,
   feedback: { prevTitle: string; problems: string[] } | null,
 ): Promise<Record<string, unknown> | null> {
+  updateLlmCallPass(feedback ? "write-retry" : "write");
   return chatJson({ system: WRITE_SYSTEM, user: writeUser(entry, card, feedback) });
+}
+
+/** B1: LLM 실패·데드라인 보류 페이로드. 원문 폴백과 같은 모양이지만
+ *  keep=false라 삽입되지 않고, 다음 회차 피드에 다시 나타나 재분류된다.
+ *  데드라인만 도입하면 원문 삽입이 늘어나는 부작용을 원천 차단한다 (확정안). */
+function llmFailureHold(entry: RawEntry, kind: "llm-fail" | "deadline"): IngestPayload {
+  return { ...fallbackPayload(entry), keep: false, held: true, holdKinds: [kind] };
+}
+
+/** B1: 포이즌 제외 페이로드 (분류 예산을 태우지 않고 종결). */
+function poisonPayload(entry: RawEntry): IngestPayload {
+  return { ...fallbackPayload(entry), keep: false, poisoned: true };
 }
 
 /** S2 계측: classifyEntry 체인(기사 1건의 직렬 LLM 호출 묶음) 소요를 재서
@@ -1623,6 +1917,8 @@ async function timedClassifyEntry(
   budget: RetryBudget | undefined,
   durations?: CollectDurations,
 ): Promise<IngestPayload> {
+  // B1: 호출 기록 라벨 (기사 해시) — 패스는 classifyEntry가 단계마다 갱신한다.
+  setLlmCallLabel({ key: hash12(entry.sourceUrl) });
   if (!durations) return classifyEntry(entry, budget);
   const startedAt = Date.now();
   try {
@@ -1633,24 +1929,37 @@ async function timedClassifyEntry(
   }
 }
 
-async function classifyEntry(entry: RawEntry, budget?: RetryBudget): Promise<IngestPayload> {
+export async function classifyEntry(entry: RawEntry, budget?: RetryBudget): Promise<IngestPayload> {
   if (shouldDrop(entry.title, entry.summary)) {
     return { ...fallbackPayload(entry), keep: false };
   }
-  if (!resolveLlm()) return fallbackPayload(entry);
+  if (!resolveLlm()) {
+    // LLM 미설정 경로는 현행 유지한다 (운용 상태이지 타임아웃이 아니다 —
+    // 확정안). 단, 원문 폴백 삽입으로 셀 수 있게 표시만 남긴다.
+    const raw = fallbackPayload(entry);
+    raw.rawFallback = true;
+    return raw;
+  }
+  // B1: 체인 시작 게이트 — 마감까지 잔여가 부족하면 시작하지 않고 보류한다
+  // (시작해 봐야 중단이 확정적인 체인의 예산 낭비 방지).
+  if (deadlineGateClosed()) return llmFailureHold(entry, "deadline");
 
   // ---- Pass 1: 사실 카드 + 중요도 점수 + 승격 근거 (등급·제목·시사점 미확정) ----
+  updateLlmCallPass("fact");
   const factJson = await chatJson({ system: FACT_SYSTEM, user: factUser(entry) });
-  if (!factJson) return fallbackPayload(entry);
+  // B1: LLM 실패(Pass1 null)는 원문 삽입이 아니라 보류로 전환한다.
+  if (!factJson) return llmFailureHold(entry, currentFailureKind());
   if (factJson.keep === false) {
     return { ...fallbackPayload(entry), keep: false };
   }
   const card = parseFactCard(factJson);
-  if (!card) return fallbackPayload(entry);
+  if (!card) return llmFailureHold(entry, "llm-fail");
 
   // ---- Pass 2: 사실 카드 기반으로만 제목·시사점 작성 ----
+  // B1: 패스 시작 전에도 잔여를 확인한다 (동적 데드라인의 패스 단위 전파).
+  if (deadlineGateClosed()) return llmFailureHold(entry, "deadline");
   const write = await writeFromCard(entry, card, null);
-  if (!write) return fallbackPayload(entry);
+  if (!write) return llmFailureHold(entry, currentFailureKind());
   let usedNames: unknown = write.usedNames;
   let payload = buildPayloadFromCard(card, write, entry);
   payload.secHint = Boolean(entry.secTitleHint);
@@ -1661,7 +1970,9 @@ async function classifyEntry(entry: RawEntry, budget?: RetryBudget): Promise<Ing
   // ---- 원문 대조 검증 + 재작성 (34차 제목 하한 재시도와 통합, run당 예산 공유) ----
   let violations = verifyAgainstCard(payload.title, payload.takeaway, payload.summary, card, entry, usedNames);
   const titleShort = [...payload.title].length < 28;
-  if ((violations.length > 0 || titleShort) && budget && budget.left > 0) {
+  // B1: 재작성 패스도 게이트를 지난다 — 잔여가 부족하면 재시도를 건너뛰고
+  // 현재 페이로드의 검증 결과(위반 시 보류)로 종결한다.
+  if ((violations.length > 0 || titleShort) && budget && budget.left > 0 && !deadlineGateClosed()) {
     budget.left -= 1;
     const problems = violations.map((v) => v.detail);
     if (titleShort) {
