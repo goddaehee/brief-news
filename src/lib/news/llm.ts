@@ -81,6 +81,21 @@ function isGlm5(model: string): boolean {
   return /^glm-5/i.test(model);
 }
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
+/**
+ * S2 계측 (관찰 전용): 수집 회차의 LLM 호출 계측 문맥.
+ * chatJson은 호출 횟수·최장 단일 호출 시간을 여기에 누적만 한다 (동작 불변).
+ * AsyncLocalStorage로 실행 문맥에 묶는다 — 동시 실행되는 /api/ingest 경로의
+ * 호출이 수집 회차 계측에 섞이지 않는다 (Codex 리뷰 반영).
+ * 문맥이 없으면 아무것도 하지 않는다.
+ */
+export type LlmCallMetrics = { calls: number; maxMs: number };
+const llmMetricsStorage = new AsyncLocalStorage<LlmCallMetrics | null>();
+export function setLlmMetricsSink(sink: LlmCallMetrics | null): void {
+  llmMetricsStorage.enterWith(sink);
+}
+
 export async function chatJson(args: {
   system: string;
   user: string;
@@ -88,6 +103,23 @@ export async function chatJson(args: {
   const cfg = resolveLlm();
   if (!cfg) return null;
 
+  const startedAt = Date.now();
+  try {
+    return await chatJsonWithConfig(cfg, args);
+  } finally {
+    const sink = llmMetricsStorage.getStore();
+    if (sink) {
+      sink.calls += 1;
+      const ms = Date.now() - startedAt;
+      if (ms > sink.maxMs) sink.maxMs = ms;
+    }
+  }
+}
+
+async function chatJsonWithConfig(
+  cfg: LlmConfig,
+  args: { system: string; user: string },
+): Promise<Record<string, unknown> | null> {
   const body: Record<string, unknown> = {
     model: cfg.model,
     max_tokens: 700,
