@@ -1,5 +1,5 @@
 import { isSeedItem } from "./data";
-import { chatJson, resolveLlm } from "./llm";
+import { chatJson, resolveLlm, setLlmMetricsSink, type LlmCallMetrics } from "./llm";
 import {
   assessShadow,
   buildPayloadFromCard,
@@ -47,6 +47,7 @@ import {
 } from "./repo";
 import type {
   CollectDetail,
+  CollectDurations,
   CollectResult,
   CollectStats,
   DropLedgerRow,
@@ -106,6 +107,26 @@ export function newCollectStats(): CollectStats {
     lowFreqInserted: 0,
     generalWaitlist: 0,
     dropBatchFull: 0,
+  };
+}
+
+/** S2 계측: 단계별 소요 시간 초기화 (전 필드 0). 관찰 전용. */
+export function newCollectDurations(): CollectDurations {
+  return {
+    totalMs: 0,
+    setupMs: 0,
+    blockAMs: 0,
+    pullMs: 0,
+    rewriteMs: 0,
+    dedupeMs: 0,
+    batchMs: 0,
+    ledeMs: 0,
+    classifyMs: 0,
+    insertMs: 0,
+    finalizeMs: 0,
+    llmCalls: 0,
+    llmMaxCallMs: 0,
+    llmMaxChainMs: 0,
   };
 }
 
@@ -251,6 +272,24 @@ export async function collectOnce(): Promise<CollectResult> {
     const retryBudget: RetryBudget = { left: 12 };
     // Phase 0 계측: 단계별 탈락 카운터 (동작 변경 없는 순수 계측)
     const stats = newCollectStats();
+    // S2 계측: 단계별 소요 시간 + LLM 호출 계측 (관찰 전용, 동작 불변).
+    // stats.durations에 같은 객체를 걸어 두어 오류 시 부분 스냅샷에도 남긴다.
+    const runStartedAt = Date.now();
+    const durations = newCollectDurations();
+    const llmMetrics: LlmCallMetrics = { calls: 0, maxMs: 0 };
+    setLlmMetricsSink(llmMetrics);
+    stats.durations = durations;
+    // S2 계측: 단계 시작 시각 (0 = 미진입). 실패한 단계의 소요를 catch에서
+    // 채우기 위해 지역 let으로 둔다 (Codex 리뷰 반영).
+    let blockAStartedAt = 0;
+    let pullStartedAt = 0;
+    let rewriteStartedAt = 0;
+    let dedupeStartedAt = 0;
+    let batchStartedAt = 0;
+    let ledeStartedAt = 0;
+    let classifyStartedAt = 0;
+    let insertStartedAt = 0;
+    let finalizeStartedAt = 0;
     // 오류 시 부분 집계가 어느 단계에서 끊겼는지 표시하기 위한 진행 단계
     let statsStage = "pull";
     let fetched = 0;
@@ -274,13 +313,40 @@ export async function collectOnce(): Promise<CollectResult> {
         return c;
       };
       // rewriteStale과 pullRss는 독립적이므로 병렬 실행 (Vercel 60초 제한 대응)
+      // S2 계측: 블록 전체 벽시계(blockAMs)와 각 갈래 소요를 따로 잰다.
+      // 갈래 소요는 finally로 남긴다 — 한쪽이 실패해도 다른 쪽 기록이 남고,
+      // 실패한 갈래도 실패 시점까지의 경과가 기록된다.
+      blockAStartedAt = Date.now();
+      durations.setupMs = blockAStartedAt - runStartedAt;
       const [rewritten, entries] = await Promise.all([
-        rewriteStale(existing, retryBudget),
-        pullRss(stats, bySource),
+        (async () => {
+          rewriteStartedAt = Date.now();
+          try {
+            return await rewriteStale(existing, retryBudget, durations);
+          } finally {
+            durations.rewriteMs = Date.now() - rewriteStartedAt;
+            rewriteStartedAt = 0; // 완료 표시 — catch의 미완료 채움과 구분
+          }
+        })(),
+        (async () => {
+          pullStartedAt = Date.now();
+          try {
+            return await pullRss(stats, bySource);
+          } finally {
+            durations.pullMs = Date.now() - pullStartedAt;
+            pullStartedAt = 0;
+          }
+        })(),
       ]);
+      durations.blockAMs = Date.now() - blockAStartedAt;
+      blockAStartedAt = 0;
       statsStage = "dedupe";
       // rewriteStale이 삭제/업데이트했을 수 있으므로 최신 피드로 다시 조회 후 중복 정리 (P2)
+      dedupeStartedAt = Date.now();
       const deduped = await dedupeExisting(await listNews());
+      durations.dedupeMs = Date.now() - dedupeStartedAt;
+      dedupeStartedAt = 0;
+      batchStartedAt = Date.now();
       fetched = entries.length;
       const newCap = rewritten > 0 ? Math.min(5, COLLECT_MAX_NEW) : COLLECT_MAX_NEW;
       // 중복 체크는 전체 URL Set으로 (순차 DB 왕복 제거). existingItems(200건 창)는
@@ -616,8 +682,11 @@ export async function collectOnce(): Promise<CollectResult> {
       stats.keptNew = stats.kept - stats.dropAlreadyInDb;
       stats.dropBatchMax = 0;
       stats.batch = fresh.length;
+      durations.batchMs = Date.now() - batchStartedAt;
+      batchStartedAt = 0;
 
       // P0-1: summary가 빈 fresh 후보는 기사 본문 첫 ~500자를 발췌해 보강 (제목만 보고 keep=false 탈락 방지)
+      ledeStartedAt = Date.now();
       await Promise.all(
         fresh.map(async (entry) => {
           if (entry.summary && entry.summary.trim().length >= 40) return;
@@ -625,9 +694,14 @@ export async function collectOnce(): Promise<CollectResult> {
           if (lede) entry.summary = lede;
         }),
       );
+      durations.ledeMs = Date.now() - ledeStartedAt;
+      ledeStartedAt = 0;
 
       statsStage = "classify";
-      const classified = await Promise.all(fresh.map((entry) => classifyEntry(entry, retryBudget)));
+      classifyStartedAt = Date.now();
+      const classified = await Promise.all(
+        fresh.map((entry) => timedClassifyEntry(entry, retryBudget, durations)),
+      );
       // Phase 1: 등급 거버너 — 편입 대상에 최근 40건 비율 12~18% 적용.
       // 비율 이탈은 govSignal로만 남긴다 (자동 강등은 상한 초과 일반 승격분 한정).
       const gov = applyGovernor(classified, existingItems, newCap);
@@ -671,9 +745,13 @@ export async function collectOnce(): Promise<CollectResult> {
           holdKinds: payload.holdKinds ?? [],
         };
       });
+      // S2 계측: classifyMs는 분류 웨이브 + 거버너 + 건별 기록 구간까지다.
+      durations.classifyMs = Date.now() - classifyStartedAt;
+      classifyStartedAt = 0;
       stats.ruleVersion = COLLECT_RULE_VERSION;
       stats.model = resolveLlm()?.model ?? null;
       statsStage = "insert";
+      insertStartedAt = Date.now();
       for (let i = 0; i < classified.length; i++) {
         const payload = classified[i];
         const entry = fresh[i];
@@ -713,7 +791,10 @@ export async function collectOnce(): Promise<CollectResult> {
         }
       }
 
+      durations.insertMs = Date.now() - insertStartedAt;
+      insertStartedAt = 0;
       statsStage = "finalize";
+      finalizeStartedAt = Date.now();
       if (inserted > 0 || rewritten > 0 || deduped > 0) await refreshBriefing();
 
       const note =
@@ -741,6 +822,12 @@ export async function collectOnce(): Promise<CollectResult> {
       } catch {
         /* 보존 정리 실패는 무시 */
       }
+      // S2 계측: finishRun이 stats를 직렬화하므로 그 직전에 마감 값을 채운다.
+      durations.finalizeMs = Date.now() - finalizeStartedAt;
+      finalizeStartedAt = 0;
+      durations.totalMs = Date.now() - runStartedAt;
+      durations.llmCalls = llmMetrics.calls;
+      durations.llmMaxCallMs = llmMetrics.maxMs;
       await finishRun(runId, {
         status: "ok",
         fetched,
@@ -770,7 +857,37 @@ export async function collectOnce(): Promise<CollectResult> {
       const message = err instanceof Error ? err.message : "collect failed";
       // 부분 집계 스냅샷: Promise.all의 다른 작업이 stats를 계속 바꿀 수 있어
       // 로그와 응답이 같은 복사본을 보도록 고정한다 (Codex 리뷰 반영).
-      const statsSnapshot: CollectStats = { ...stats, partial: true, failedStage: statsStage };
+      // S2 계측: 실패 지점까지의 소요·LLM 호출도 마감해 스냅샷에 남긴다.
+      durations.totalMs = Date.now() - runStartedAt;
+      durations.llmCalls = llmMetrics.calls;
+      durations.llmMaxCallMs = llmMetrics.maxMs;
+      // S2 계측 (Codex 리뷰): 진행 중이던 단계는 시작 시각부터의 경과로 채우고,
+      // durations는 복사본으로 고정한다 — Promise.all의 다른 갈래가 계속
+      // 실행돼 원본을 바꿔도 로그·응답의 스냅샷은 변하지 않는다.
+      if (blockAStartedAt > 0 && durations.blockAMs === 0)
+        durations.blockAMs = Date.now() - blockAStartedAt;
+      if (rewriteStartedAt > 0 && durations.rewriteMs === 0)
+        durations.rewriteMs = Date.now() - rewriteStartedAt;
+      if (pullStartedAt > 0 && durations.pullMs === 0)
+        durations.pullMs = Date.now() - pullStartedAt;
+      if (dedupeStartedAt > 0 && durations.dedupeMs === 0)
+        durations.dedupeMs = Date.now() - dedupeStartedAt;
+      if (batchStartedAt > 0 && durations.batchMs === 0)
+        durations.batchMs = Date.now() - batchStartedAt;
+      if (ledeStartedAt > 0 && durations.ledeMs === 0)
+        durations.ledeMs = Date.now() - ledeStartedAt;
+      if (classifyStartedAt > 0 && durations.classifyMs === 0)
+        durations.classifyMs = Date.now() - classifyStartedAt;
+      if (insertStartedAt > 0 && durations.insertMs === 0)
+        durations.insertMs = Date.now() - insertStartedAt;
+      if (finalizeStartedAt > 0 && durations.finalizeMs === 0)
+        durations.finalizeMs = Date.now() - finalizeStartedAt;
+      const statsSnapshot: CollectStats = {
+        ...stats,
+        durations: { ...durations },
+        partial: true,
+        failedStage: statsStage,
+      };
       console.log(`[collect-stats] ${JSON.stringify(statsSnapshot)}`);
       await finishRun(runId, {
         status: "error",
@@ -792,6 +909,7 @@ export async function collectOnce(): Promise<CollectResult> {
       };
     }
   } finally {
+    setLlmMetricsSink(null);
     await releaseCollectLock(owner);
   }
 }
@@ -1200,7 +1318,11 @@ function sharesTopicAnchor(a: string, b: string, da?: number, db?: number): bool
   return common.some((t) => /^(a16z|[a-z]{3,})$/.test(t));  // 36차 실측 후속: a16z만 예외 (32차 sk·hbm4 가드 유지)
 }
 
-async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>, budget?: RetryBudget): Promise<number> {
+async function rewriteStale(
+  existing: Awaited<ReturnType<typeof listNews>>,
+  budget?: RetryBudget,
+  durations?: CollectDurations,
+): Promise<number> {
   if (!resolveLlm()) return 0;
   // 24차 P0: 오타/파편을 일반 stale보다 먼저 처리 — "앤스로픽"이 3라운드 정체된 원인.
   // needsRewrite는 통과하는데 큐 앞에서 밀려서 처리 안 됨.
@@ -1221,13 +1343,13 @@ async function rewriteStale(existing: Awaited<ReturnType<typeof listNews>>, budg
       if (shouldDrop(item.title, item.summary) || shouldDrop(item.originalTitle, item.summary)) {
         return (await deleteItem(item.id)) ? 1 : 0;
       }
-      const payload = await classifyEntry({
+      const payload = await timedClassifyEntry({
         title: item.originalTitle || item.title,
         sourceUrl: item.sourceUrl,
         source: item.source,
         date: item.publishedAt,
         summary: item.summary,
-      }, budget);
+      }, budget, durations);
       if (payload.keep === false) {
         return (await deleteItem(item.id)) ? 1 : 0;
       }
@@ -1492,6 +1614,23 @@ async function writeFromCard(
   feedback: { prevTitle: string; problems: string[] } | null,
 ): Promise<Record<string, unknown> | null> {
   return chatJson({ system: WRITE_SYSTEM, user: writeUser(entry, card, feedback) });
+}
+
+/** S2 계측: classifyEntry 체인(기사 1건의 직렬 LLM 호출 묶음) 소요를 재서
+ *  durations.llmMaxChainMs에 최장값만 남긴다. durations가 없으면 그대로 위임 (동작 불변). */
+async function timedClassifyEntry(
+  entry: RawEntry,
+  budget: RetryBudget | undefined,
+  durations?: CollectDurations,
+): Promise<IngestPayload> {
+  if (!durations) return classifyEntry(entry, budget);
+  const startedAt = Date.now();
+  try {
+    return await classifyEntry(entry, budget);
+  } finally {
+    const ms = Date.now() - startedAt;
+    if (ms > durations.llmMaxChainMs) durations.llmMaxChainMs = ms;
+  }
 }
 
 async function classifyEntry(entry: RawEntry, budget?: RetryBudget): Promise<IngestPayload> {
