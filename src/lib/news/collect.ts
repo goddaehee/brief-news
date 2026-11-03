@@ -2289,8 +2289,18 @@ async function ingestWithinDeadline(
         // D-2: LLM 실패·데드라인 보류(held)와 포이즌 제외는 품질 탈락이 아니라
         // 이번 요청에서의 미처리다 — 삽입되지 않은 채 deferred로 돌려 호출자가
         // 재시도하게 한다. insert는 체인 끝에서만 일어나므로 쓰다 만 행은 없다.
+        // P3-2 (사용자 결정 2026-11-03): 품질 보류 — 원문 대조 위반
+        // (number/status/entity)이 확정된 hold는 재시도해도 판정이 바뀌지 않는
+        // 확정적 품질 탈락이라 deferred가 아니라 rejected(종결)로 돌린다.
+        // holdKinds에 위반 종류가 하나라도 있으면 품질 보류로 본다 (LLM 실패·
+        // 데드라인 종류와는 생성 경로가 겹치지 않음). 이 구분은 ingest 경로
+        // 전용이다 — collect 경로는 기존 deskHeld 계수·원장 스테이지를 유지.
         if (desked.held === true || desked.poisoned === true) {
-          record(item.sourceUrl, "deferred", itemStartedAt, gate);
+          const kinds = desked.holdKinds ?? [];
+          const qualityHold = kinds.some(
+            (k) => k === "number" || k === "status" || k === "entity",
+          );
+          record(item.sourceUrl, qualityHold ? "rejected" : "deferred", itemStartedAt, gate);
           continue;
         }
         // 강제 재작성 경로에서는 데스크가 실제로 다시 쓴 경우(keep===true)에만 입고한다.
