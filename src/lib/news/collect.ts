@@ -8,6 +8,7 @@ import {
   setLlmDeadline,
   setLlmMetricsSink,
   updateLlmCallPass,
+  withLlmDeadline,
   type LlmCallMetrics,
   type LlmDeadlineContext,
 } from "./llm";
@@ -66,7 +67,9 @@ import type {
   CollectStats,
   DropLedgerRow,
   FactCard,
+  IngestItemResult,
   IngestPayload,
+  IngestResult,
   NewsItem,
   ScoredEntry,
   SourceStageCounts,
@@ -2131,7 +2134,63 @@ function isEnglishDominant(s: string): boolean {
   return hangul / letters < 0.3;
 }
 
-export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted: number; skipped: number }> {
+/** X ingest 개선안 D-1: ingest 요청의 처리 중단 지점 — 종료 기한
+ *  FINISH_DEADLINE_MS(55초)에서 종료 예비 FINISH_RESERVE_MS를 뺀 시점부터는
+ *  새 항목 처리를 시작하지 않고 deferred로 돌린다. */
+export const INGEST_FINISH_STOP_MS = FINISH_DEADLINE_MS - FINISH_RESERVE_MS;
+
+/** ingest 데드라인 주입 지점 (테스트용) — 운영 기본값은 B1 확정 수치. */
+export type IngestDeadlineOptions = {
+  llmDeadlineMs?: number;
+  finishStopMs?: number;
+};
+
+/** D-2: 영문 게이트(데스크 패스) 필요 판정 — 게이트 발동 조건과 동일하게
+ *  제목·시사점이 모두 영문 우세일 때만 무거운 항목으로 본다. */
+function ingestNeedsGate(item: IngestPayload): boolean {
+  return (
+    isEnglishDominant(item.title) &&
+    (!item.takeaway || isEnglishDominant(item.takeaway))
+  );
+}
+
+export async function ingestPayloads(
+  items: IngestPayload[],
+  opts?: IngestDeadlineOptions,
+): Promise<IngestResult> {
+  const startedAt = Date.now();
+  // D-1: collect(B1)과 같은 2단계 데드라인 문맥을 ingest에도 건다.
+  // 마감 타이머가 AbortController를 중단시켜 진행 중 LLM fetch까지 취소하고,
+  // classifyEntry의 체인 시작 게이트(잔여 10초)·호출별 유효 타임아웃
+  // min(25초, 잔여)이 그대로 동작한다. 어떤 회차도 60초 상한에 닿지 않고
+  // 200으로 종료하는 것이 목적이다.
+  const deadline: LlmDeadlineContext = createLlmDeadline(
+    startedAt + (opts?.llmDeadlineMs ?? LLM_DEADLINE_MS),
+  );
+  const deadlineTimer = setTimeout(
+    () => deadline.controller.abort(),
+    Math.max(0, deadline.deadlineAt - Date.now()),
+  );
+  try {
+    // 문맥은 withLlmDeadline(run 스코프)으로만 건다 — enterWith로 걸면
+    // 동시 실행 중인 collect 회차의 계보와 간섭할 수 있다 (리뷰 P1).
+    return await withLlmDeadline(deadline, () =>
+      ingestWithinDeadline(
+        items,
+        startedAt,
+        opts?.finishStopMs ?? INGEST_FINISH_STOP_MS,
+      ),
+    );
+  } finally {
+    clearTimeout(deadlineTimer);
+  }
+}
+
+async function ingestWithinDeadline(
+  items: IngestPayload[],
+  startedAt: number,
+  finishStopMs: number,
+): Promise<IngestResult> {
   const retryBudget: RetryBudget = { left: 12 };
   await ensureSeeded();
   // P0: RSS 수집 경로와 동일한 중복 검사. X 보충 수집이 볼륨을 키우기 전 구멍 봉쇄.
@@ -2141,77 +2200,153 @@ export async function ingestPayloads(items: IngestPayload[]): Promise<{ inserted
   const existingItems = (await listNews()).filter((i) => !isSeedItem(i));
   const existingUrls = new Set(await listAllSourceUrls());
   const batch: IngestPayload[] = [];
+  const results: IngestItemResult[] = [];
   let inserted = 0;
-  let skipped = 0;
-  for (let item of items.slice(0, INGEST_MAX_BATCH)) {
-    if (!item.title || !item.sourceUrl) {
-      skipped += 1;
-      continue;
+  let duplicate = 0;
+  let rejected = 0;
+  let deferred = 0;
+  const record = (
+    sourceUrl: string,
+    status: IngestItemResult["status"],
+    itemStartedAt: number,
+    gate: boolean,
+  ) => {
+    results.push({
+      sourceUrl,
+      status,
+      elapsedMs: Math.max(0, Date.now() - itemStartedAt),
+      gate,
+    });
+    if (status === "inserted") inserted += 1;
+    else if (status === "duplicate") duplicate += 1;
+    else if (status === "rejected") rejected += 1;
+    else deferred += 1;
+  };
+
+  // D-2: 한글 우선 처리 순서 — 가벼운 한글 항목을 먼저 처리하고 영문 게이트
+  // 대상(무거운 항목)을 꼬리에 둬서, 예산이 소진되면 비싼 항목부터 deferred로
+  // 빠지게 한다. 같은 그룹 안에서는 원래 순서를 유지한다 (안정 정렬).
+  const ordered = items
+    .slice(0, INGEST_MAX_BATCH)
+    .map((item, idx) => ({ item, idx, gate: ingestNeedsGate(item) }))
+    .sort((a, b) => Number(a.gate) - Number(b.gate) || a.idx - b.idx);
+  const overflow = items.slice(INGEST_MAX_BATCH);
+
+  for (let n = 0; n < ordered.length; n += 1) {
+    let item = ordered[n].item;
+    const itemStartedAt = Date.now();
+    let gate = false;
+    // D-1: 종료 기한 임박 — 남은 항목은 시작하지 않고 전부 deferred로 돌린다.
+    if (Date.now() - startedAt >= finishStopMs) {
+      for (let m = n; m < ordered.length; m += 1) {
+        record(ordered[m].item.sourceUrl ?? "", "deferred", itemStartedAt, ordered[m].gate);
+      }
+      break;
     }
-    // 29차 크로스 리뷰: 중복 URL은 데스크 패스(LLM) 전에 제외 — 이미 있는 기사를
-    // 영문 게이트가 먼저 재작성하고 뒤늦게 버리는 LLM 낭비 방지.
-    if (existingUrls.has(item.sourceUrl)) {
-      skipped += 1;
-      continue;
-    }
-    // P0-1 (17차): 표시 정규화 — 외래 고유명사 오타를 표준 표기로 통일 (앤스로픽 → 앤트로픽).
-    // 중복 비교 전에 적용하면 오타 변형도 같은 기사로 잡히고, 피드에도 오타가 노출되지 않음.
-    item.title = normalizeDisplayNames(item.title);
-    if (item.takeaway) item.takeaway = normalizeDisplayNames(item.takeaway);
-    if (item.summary) item.summary = normalizeDisplayNames(item.summary);
-    if (item.originalTitle) item.originalTitle = normalizeDisplayNames(item.originalTitle);
-    // 26차 P0-2: X 파이프라인 bare 어미 교정 — "… 확인." → "… 확인 필요."
-    if (item.takeaway) item.takeaway = fixBareEnding(item.takeaway);
-    // 28차 P0: X 경로 desk 품질 게이트 — fixTypos 적용 (polishPayload와 동일한 교정)
-    item.title = fixTypos(item.title);
-    if (item.takeaway) item.takeaway = fixTypos(item.takeaway);
-    if (item.summary) item.summary = fixTypos(item.summary);
-    // 29차 P0: 영문 미번역 게이트 — X ingest 번역 폴백으로 들어온 영문 제목·시사점이
-    // 그대로 피드 최상위에 노출됨 (실측: [속보] 2건 제목·시사점 100% 영문, 요약=시사점 동일 문장).
-    // 영문 우세면 즉시 넣지 말고 RSS와 같은 데스크 패스(classifyEntry)로 한국어 재작성을 강제한다.
-    // 제목·시사점이 모두 영문 우세일 때만 발동 — 영문 제품명이 많은 정상 한글 제목
-    // ("NVIDIA Nemotron 3.5 공개" + 한글 시사점)의 오탐 방지 (29차 크로스 리뷰).
-    // 유사도 검사는 최종(한국어) 제목 기준으로 해야 하므로 그보다 앞에 둔다.
-    if (isEnglishDominant(item.title) && (!item.takeaway || isEnglishDominant(item.takeaway))) {
-      const desked = await classifyEntry({
-        title: item.originalTitle || item.title,
-        sourceUrl: item.sourceUrl,
-        source: item.source,
-        date: item.publishedAt ?? Date.now(),
-        summary: item.summary || item.takeaway || "",
-      }, retryBudget);
-      // 강제 재작성 경로에서는 데스크가 실제로 다시 쓴 경우(keep===true)에만 입고한다.
-      // LLM 실패 폴백(keep 필드 없음)·드롭 판정·결과가 여전히 영문이면 넣지 않는다 —
-      // 게이트가 오히려 새 영문 노출 통로가 되는 것 방지 (29차 크로스 리뷰 블로커).
-      if (
-        desked.keep !== true ||
-        isEnglishDominant(desked.title) ||
-        (desked.takeaway && isEnglishDominant(desked.takeaway))
-      ) {
-        skipped += 1;
+    try {
+      if (!item.title || !item.sourceUrl) {
+        record(item.sourceUrl ?? "", "rejected", itemStartedAt, gate);
         continue;
       }
-      item = desked;
+      // 29차 크로스 리뷰: 중복 URL은 데스크 패스(LLM) 전에 제외 — 이미 있는 기사를
+      // 영문 게이트가 먼저 재작성하고 뒤늦게 버리는 LLM 낭비 방지.
+      if (existingUrls.has(item.sourceUrl)) {
+        record(item.sourceUrl, "duplicate", itemStartedAt, gate);
+        continue;
+      }
+      // P0-1 (17차): 표시 정규화 — 외래 고유명사 오타를 표준 표기로 통일 (앤스로픽 → 앤트로픽).
+      // 중복 비교 전에 적용하면 오타 변형도 같은 기사로 잡히고, 피드에도 오타가 노출되지 않음.
+      item.title = normalizeDisplayNames(item.title);
+      if (item.takeaway) item.takeaway = normalizeDisplayNames(item.takeaway);
+      if (item.summary) item.summary = normalizeDisplayNames(item.summary);
+      if (item.originalTitle) item.originalTitle = normalizeDisplayNames(item.originalTitle);
+      // 26차 P0-2: X 파이프라인 bare 어미 교정 — "… 확인." → "… 확인 필요."
+      if (item.takeaway) item.takeaway = fixBareEnding(item.takeaway);
+      // 28차 P0: X 경로 desk 품질 게이트 — fixTypos 적용 (polishPayload와 동일한 교정)
+      item.title = fixTypos(item.title);
+      if (item.takeaway) item.takeaway = fixTypos(item.takeaway);
+      if (item.summary) item.summary = fixTypos(item.summary);
+      // 29차 P0: 영문 미번역 게이트 — X ingest 번역 폴백으로 들어온 영문 제목·시사점이
+      // 그대로 피드 최상위에 노출됨 (실측: [속보] 2건 제목·시사점 100% 영문, 요약=시사점 동일 문장).
+      // 영문 우세면 즉시 넣지 말고 RSS와 같은 데스크 패스(classifyEntry)로 한국어 재작성을 강제한다.
+      // 제목·시사점이 모두 영문 우세일 때만 발동 — 영문 제품명이 많은 정상 한글 제목
+      // ("NVIDIA Nemotron 3.5 공개" + 한글 시사점)의 오탐 방지 (29차 크로스 리뷰).
+      // 유사도 검사는 최종(한국어) 제목 기준으로 해야 하므로 그보다 앞에 둔다.
+      if (ingestNeedsGate(item)) {
+        gate = true;
+        const desked = await classifyEntry({
+          title: item.originalTitle || item.title,
+          sourceUrl: item.sourceUrl,
+          source: item.source,
+          date: item.publishedAt ?? Date.now(),
+          summary: item.summary || item.takeaway || "",
+        }, retryBudget);
+        // D-2: LLM 실패·데드라인 보류(held)와 포이즌 제외는 품질 탈락이 아니라
+        // 이번 요청에서의 미처리다 — 삽입되지 않은 채 deferred로 돌려 호출자가
+        // 재시도하게 한다. insert는 체인 끝에서만 일어나므로 쓰다 만 행은 없다.
+        if (desked.held === true || desked.poisoned === true) {
+          record(item.sourceUrl, "deferred", itemStartedAt, gate);
+          continue;
+        }
+        // 강제 재작성 경로에서는 데스크가 실제로 다시 쓴 경우(keep===true)에만 입고한다.
+        // LLM 실패 폴백(keep 필드 없음)·드롭 판정·결과가 여전히 영문이면 넣지 않는다 —
+        // 게이트가 오히려 새 영문 노출 통로가 되는 것 방지 (29차 크로스 리뷰 블로커).
+        if (
+          desked.keep !== true ||
+          isEnglishDominant(desked.title) ||
+          (desked.takeaway && isEnglishDominant(desked.takeaway))
+        ) {
+          record(item.sourceUrl, "rejected", itemStartedAt, gate);
+          continue;
+        }
+        item = desked;
+      }
+      if (
+        existingItems.some(
+          (i) =>
+            tooSimilar(i.title, item.title, i.publishedAt, item.publishedAt) ||
+            tooSimilar(i.originalTitle, item.title, i.publishedAt, item.publishedAt),
+        ) ||
+        batch.some((f) => tooSimilar(f.title, item.title, f.publishedAt, item.publishedAt))
+      ) {
+        // D-2: 근접 중복은 사실상 이미 피드에 있는 기사 — duplicate로 구분한다.
+        record(item.sourceUrl, "duplicate", itemStartedAt, gate);
+        continue;
+      }
+      batch.push(item);
+      existingUrls.add(item.sourceUrl);
+      const ok = await insertItem(item);
+      // insertItem의 false는 on conflict (source_url) — 경합으로 먼저 들어간 중복이다.
+      record(item.sourceUrl, ok ? "inserted" : "duplicate", itemStartedAt, gate);
+    } catch (err) {
+      // D-2: 항목 단위 일시 오류가 배치 전체를 죽이지 않게 한다. 이미 커밋된
+      // 항목은 남고, 이 항목은 deferred로 돌려 호출자가 재시도할 수 있다.
+      console.error(
+        `[ingest] 항목 처리 오류 → deferred: ${item.sourceUrl} — ${err instanceof Error ? err.message : String(err)}`,
+      );
+      record(item.sourceUrl ?? "", "deferred", itemStartedAt, gate);
     }
-    if (
-      existingItems.some(
-        (i) =>
-          tooSimilar(i.title, item.title, i.publishedAt, item.publishedAt) ||
-          tooSimilar(i.originalTitle, item.title, i.publishedAt, item.publishedAt),
-      ) ||
-      batch.some((f) => tooSimilar(f.title, item.title, f.publishedAt, item.publishedAt))
-    ) {
-      skipped += 1;
-      continue;
-    }
-    batch.push(item);
-    existingUrls.add(item.sourceUrl);
-    const ok = await insertItem(item);
-    if (ok) inserted += 1;
-    else skipped += 1;
+  }
+  // 서버 상한(INGEST_MAX_BATCH)을 넘는 입력은 처리하지 않고 deferred로 알린다.
+  for (const item of overflow) {
+    results.push({
+      sourceUrl: item.sourceUrl ?? "",
+      status: "deferred",
+      elapsedMs: 0,
+      gate: ingestNeedsGate(item),
+    });
+    deferred += 1;
   }
   if (inserted > 0) await refreshBriefing();
-  return { inserted, skipped };
+  return {
+    inserted,
+    skipped: duplicate + rejected,
+    duplicate,
+    rejected,
+    deferred,
+    heapUsedMb: Math.round((process.memoryUsage().heapUsed / 1048576) * 10) / 10,
+    items: results,
+  };
 }
 
 export async function ingestMarkdownBatch(markdownFiles: string[]) {
