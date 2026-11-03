@@ -120,6 +120,17 @@ export function createLlmDeadline(deadlineAt: number): LlmDeadlineContext {
 export function setLlmDeadline(ctx: LlmDeadlineContext | null): void {
   llmDeadlineStorage.enterWith(ctx);
 }
+/** D-1 (리뷰 P1 반영): 데드라인 문맥을 fn의 비동기 계보 안에만 스코프한다.
+ *  enterWith는 현재 계보의 문맥을 영속적으로 바꾸므로, 동시 실행되는 다른
+ *  요청(collect 회차 등)과 한 프로세스를 공유하는 ingest 경로에서는
+ *  run()으로 감싸 문맥이 이 호출 밖으로 새지 않게 한다. collect는 전역 락으로
+ *  직렬화돼 있어 기존 setLlmDeadline 패턴을 유지한다. */
+export function withLlmDeadline<T>(
+  ctx: LlmDeadlineContext | null,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return llmDeadlineStorage.run(ctx, fn);
+}
 export function getLlmDeadline(): LlmDeadlineContext | null {
   return llmDeadlineStorage.getStore() ?? null;
 }
