@@ -58,6 +58,37 @@ export type IngestPayload = {
   poisoned?: boolean;
 };
 
+/** X ingest 개선안 D-2: ingest 항목별 결과 상태.
+ *  - inserted: 신규 삽입됨.
+ *  - duplicate: URL 중복 또는 기존 글과 근접 중복 — 재시도하지 않는다.
+ *  - rejected: 품질 탈락 (데스크 keep=false·재작성 후에도 영문 등) — 재시도하지 않는다.
+ *  - deferred: 데드라인·일시 오류로 이번 요청에서 처리되지 않음 — 재시도 대상. */
+export type IngestItemStatus = "inserted" | "duplicate" | "rejected" | "deferred";
+
+export type IngestItemResult = {
+  sourceUrl: string;
+  status: IngestItemStatus;
+  /** 이 항목 처리에 걸린 시간 (ms). */
+  elapsedMs: number;
+  /** 영문 게이트(classifyEntry 데스크 패스)가 발동했는지. */
+  gate: boolean;
+};
+
+/** ingest 응답 계약 (D-1 데드라인 + D-2 부분 성공 구분).
+ *  inserted·skipped는 기존 호출자용 집계 하위 호환 필드이며,
+ *  skipped = duplicate + rejected 다 (deferred는 미처리라 skipped에 넣지 않는다). */
+export type IngestResult = {
+  inserted: number;
+  skipped: number;
+  duplicate: number;
+  rejected: number;
+  deferred: number;
+  /** 응답 시점 heap 사용량 (MB) — 타임아웃/OOM 간접 판별용 계측. */
+  heapUsedMb: number;
+  /** 항목별 결과 (처리 순서대로 — 한글 우선 정렬이 반영된 순서). */
+  items: IngestItemResult[];
+};
+
 /** Phase 1 하드 게이트 범주 — 적중하면 등급 거버너와 무관하게 [중요] 보장. */
 export type HardGate = "supply-chain" | "malware" | "cve" | "outage" | "price-today";
 
