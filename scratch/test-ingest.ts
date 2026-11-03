@@ -244,6 +244,22 @@ async function main() {
     resetLlmContext();
   }
 
+  // ---------- 제목 필드 자체가 없는/null인 항목 → 배치 500이 아니라 rejected (리뷰 P2-1) ----------
+  {
+    resetLlmContext();
+    stubFetch(() => httpFail());
+    const missing = koItem("정상 한글 제목의 기사입니다", "정상이다. 확인 필요.");
+    delete (missing as Partial<IngestPayload>).title;
+    const nulled = koItem("다른 정상 한글 제목의 기사", "정상이다. 확인 필요.");
+    nulled.title = null as unknown as string;
+    const okItem = koItem("세 번째 정상 한글 제목의 기사", "정상이다. 확인 필요.");
+    const r = await ingestPayloads([missing, nulled, okItem]);
+    check("제목 결손: 배치 전체가 죽지 않음", r.items.length, 3);
+    check("제목 결손 2건 rejected", r.rejected, 2);
+    check("제목 결손: 정상 항목은 삽입", r.inserted, 1);
+    resetLlmContext();
+  }
+
   // ---------- 문맥 격리 (리뷰 P1-1 회귀 방지): ingest의 데드라인 문맥이
   // 바깥(collect 등)의 문맥을 덮거나 새지 않는다 ----------
   {
