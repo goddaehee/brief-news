@@ -178,6 +178,32 @@ async function main() {
     resetLlmContext();
   }
 
+  // ---------- 게이트 품질 보류(원문 대조 위반) → rejected 종결 (P3-2) ----------
+  // LLM 실패 보류(위 케이스, deferred)와 대조: 사실 카드·원문에 없는 수치를
+  // 데스크가 지어낸 경우 — 재시도해도 판정이 안 바뀌는 확정적 품질 탈락이다.
+  {
+    resetLlmContext();
+    let n = 0;
+    const WRITE_FABRICATED = {
+      title: "국내 연구진이 새로운 배터리 기술을 전기차에 적용했다",
+      takeaway: "성능이 기존보다 3배 좋아졌다. 도입 검토 필요.",
+      summary: "배터리 기술 요약 본문이다.",
+      usedNames: [] as string[],
+    };
+    stubFetch(() => {
+      n += 1;
+      return n === 1 ? jsonOk(FACT_JSON) : jsonOk(WRITE_FABRICATED);
+    });
+    const en = enItem("Startup unveils new battery technology for EVs", "New battery tech was unveiled. Details inside.");
+    const r = await ingestPayloads([en]);
+    check("품질 보류 rejected", r.rejected, 1);
+    check("품질 보류 deferred 0 (큐에 남기지 않음)", r.deferred, 0);
+    check("품질 보류 inserted 0", r.inserted, 0);
+    check("품질 보류 skipped 하위호환 1", r.skipped, 1);
+    check("품질 보류 상태", r.items[0].status, "rejected");
+    resetLlmContext();
+  }
+
   // ---------- 데드라인: 느린 LLM 체인이 60초가 아니라 마감에서 끊긴다 ----------
   {
     resetLlmContext();
