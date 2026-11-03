@@ -2148,9 +2148,14 @@ export type IngestDeadlineOptions = {
 /** D-2: 영문 게이트(데스크 패스) 필요 판정 — 게이트 발동 조건과 동일하게
  *  제목·시사점이 모두 영문 우세일 때만 무거운 항목으로 본다. */
 function ingestNeedsGate(item: IngestPayload): boolean {
+  // 리뷰 P2: 제목이 없는(미전송·null) 페이로드가 정렬 단계에서 TypeError로
+  // 배치 전체를 500으로 죽이지 않게 한다 — 그런 항목은 본 루프에서 rejected.
+  if (typeof item.title !== "string") return false;
   return (
     isEnglishDominant(item.title) &&
-    (!item.takeaway || isEnglishDominant(item.takeaway))
+    (!item.takeaway ||
+      typeof item.takeaway !== "string" ||
+      isEnglishDominant(item.takeaway))
   );
 }
 
