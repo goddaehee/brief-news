@@ -129,16 +129,37 @@ export function currentFailureKind(): "deadline" | "llm-fail" {
 export const LOW_FREQ_SOURCE_IDS = new Set(["metr", "alignmentforum"]);
 
 /**
- * Phase 2 후속: 드레인 24시간 추가 허용량. 기본 캡 6건은 유지하고,
- * 드레인으로 소스당 24시간 합계 최대 8건까지만 추가한다.
- * 일반 경로로는 24시간 삽입이 6건을 넘을 수 없으므로, 6건 초과분은
+ * 프로덕션 루프 1라운드 (2026-11-10): 차등 소스캡 — 소스 rank별 24시간
+ * 점유 상한 (C1). 단일 캡 6이 최대 손실 단계(신규 후보의 56%)로 귀속돼
+ * 주력 소스일수록 상한을 높인다. rank 미상(구 캐시·미등록)은 기존값 6.
+ */
+export function sourceCapForRank(rank?: number | null): number {
+  if (rank == null || !Number.isFinite(rank)) return 6;
+  if (rank >= 10) return 12;
+  if (rank >= 8) return 8;
+  if (rank >= 6) return 6;
+  return 4;
+}
+
+/** 프로덕션 루프 1라운드 (2026-11-10): 소스 id → 차등 캡 (C1). */
+function sourceCapForSourceId(sourceId?: string): number {
+  if (!sourceId) return 6;
+  return sourceCapForRank(NEWS_SOURCES.find((s) => s.id === sourceId)?.rank);
+}
+
+/**
+ * Phase 2 후속: 드레인 24시간 추가 허용량. 기본 캡(baseCap)은 유지하고,
+ * 드레인으로 소스당 24시간 합계 최대 baseCap+2건까지만 추가한다.
+ * 일반 경로로는 24시간 삽입이 기본 캡을 넘을 수 없으므로, 캡 초과분은
  * 전부 과거 드레인 삽입이다 — 별도 드레인 장부 없이 이 식으로 센다
  * (rewriteStale은 삽입이 아니라 갱신·삭제라 이 식을 깨지 않는다.
  * 단, ingestPayloads(X 보충 경로)는 캡을 우회하므로 그 경로가 다시
  * 살아나면 이 식은 과대 계상한다 — 그때는 드레인 장부로 바꿀 것).
+ * 프로덕션 루프 1라운드 (2026-11-10): baseCap 인자 일반화 (기본값 6 —
+ * 기존 호출·테스트 하위호환). 호출부는 해당 소스의 차등 캡을 전달한다.
  */
-export function drainRemainingAllowance(recentInserts24h: number): number {
-  return Math.max(0, 2 - Math.max(0, recentInserts24h - 6));
+export function drainRemainingAllowance(recentInserts24h: number, baseCap = 6): number {
+  return Math.max(0, 2 - Math.max(0, recentInserts24h - baseCap));
 }
 
 /** Phase 0 계측 카운터 초기화 (전 필드 0). */
@@ -160,6 +181,7 @@ export function newCollectStats(): CollectStats {
     dropKeepFalse: 0,
     dropNewCap: 0,
     dropInsertFail: 0,
+    fastTrackBatch: 0,
     keptNew: 0,
     drainCandidates: 0,
     drainBatch: 0,
@@ -226,6 +248,39 @@ export function admissionCapDecision(args: {
   if (args.sourceCount >= args.sourceCap) return "cap";
   if (args.batchCount >= args.batchSourceCap) return "batchCap";
   return "pass";
+}
+
+/** 프로덕션 루프 1라운드 (2026-11-10): 이벤트 힌트 (C2) — 제목에 대형
+ *  이벤트 신호가 있으면 소스캡만 우회하는 fast-track 대상이다. */
+export const EVENT_HINT =
+  /(출시|공개|가격|인하|인상|IPO|상장|인수|제재|장애|급락|급등|서비스\s*종료|중단|상용화)/i;
+
+/**
+ * 프로덕션 루프 1라운드 (2026-11-10): 이벤트 fast-track 판정 (C2).
+ * admissionCapDecision이 "cap"을 반환하고 제목이 EVENT_HINT에 걸리면
+ * 소스캡만 우회한다 — inDb·저빈도 상한은 이미 앞단에서 종결됐고, 우회
+ * 후에는 배치 소스캡 조건만 다시 평가해 pass/batchCap을 가른다.
+ * similar는 호출부(check)가 그대로 적용한다. admissionCapDecision
+ * 자체는 건드리지 않는다 (순수 함수 테스트 유지).
+ */
+export function capBypassDecision(
+  decision: "inDb" | "cap" | "batchCap" | "pass",
+  title: string,
+  batchCount: number,
+  batchSourceCap: number,
+): "inDb" | "cap" | "batchCap" | "pass" {
+  if (decision !== "cap") return decision;
+  if (!EVENT_HINT.test(title)) return "cap";
+  return batchCount >= batchSourceCap ? "batchCap" : "pass";
+}
+
+/**
+ * 프로덕션 루프 1라운드 (2026-11-10): 드레인 정렬 비교자 (C3) — 최신순.
+ * 기존 FIFO(오래된 것부터)는 48시간 창에서 가장 신선도가 낮은 후보부터
+ * 태워 드레인 슬롯을 소진했다.
+ */
+export function byDrainRecency(a: { date: number }, b: { date: number }): number {
+  return b.date - a.date;
 }
 
 /** Phase 2 후속: 소스별 단계 카운터 초기화. */
@@ -493,7 +548,9 @@ export async function collectOnce(): Promise<CollectResult> {
       // 유사도 검사·sourceCounts·거버너 용도로만 현행 유지한다.
       const existingUrls = new Set(allSourceUrls);
       const existingItems = existing.filter((i) => !isSeedItem(i));
-      // 소스별 하드캡: 단일 소스 최대 6건 (풍선 효과 방지 — ZDNet 잡으니 인공지능신문이 올라옴)
+      // 소스별 하드캡: 풍선 효과 방지 (ZDNet 잡으니 인공지능신문이 올라옴).
+      // 상한은 프로덕션 루프 1라운드 (2026-11-10)부터 rank 차등이다
+      // (sourceCapForRank — check()에서 후보별로 조회해 전달).
       // Phase 2: 점유 계산을 '최근 24시간 삽입분'으로 바꾼다. 기존의 200건 창
       // 기준은 삽입이 멈추면 창이 화석화돼(9개 소스가 정확히 6건에서 동결)
       // 해당 소스의 신선 기사가 영구 차단되는 교착을 만들었다 (실측:
@@ -501,8 +558,13 @@ export async function collectOnce(): Promise<CollectResult> {
       // 집계는 발행일 창과 무관하게 created_at으로 DB에서 직접 한다 —
       // 창 밖 백로그의 최근 삽입까지 세야 캡 보장이 새지 않는다 (Codex P2).
       // 풍선 방지 취지(최근 피드에서 단일 소스 점유 제한)는 24시간 기준으로 유지된다.
-      const SOURCE_CAP = 6;
       const sourceCounts = await countRecentInsertsBySource(Date.now() - 24 * 3600 * 1000);
+      // 프로덕션 루프 1라운드 (2026-11-10): 팁 동적 태깅 (C6) — 배치 단계
+      // 시작 전, 제목이 팁형이면 소스 tipLane과 OR로 tipLane을 승격한다.
+      // 레인 소스만으로는 팁 후보 공급이 부족하다는 1라운드 귀속 대응.
+      for (const e of entries) {
+        if (isTipTitle(e.title)) e.tipLane = true;
+      }
       // Phase 2 후속: 다단계 배치 선택 (배치·편입 상한 24건·6건은 유지).
       //  1) 일반: 최대 22슬롯 (tip 예약 2슬롯을 남긴다).
       //  2) tipLane 예약: 24건 중 2슬롯 (미사용분은 아래 단계로 반환, 편입 보장 없음).
@@ -510,7 +572,8 @@ export async function collectOnce(): Promise<CollectResult> {
       //     상한은 전 레인 공유 카운터로 적용한다 — 일반 단계에서 이미 뽑힌
       //     분까지 합쳐 2건·소스당 1건을 넘지 않는다.
       //  4) 드레인 파일럿: 회차당 최대 4건, 소스당 회차당 1건·24h 추가 2건
-      //     (합계 최대 8건), 발행 48h 이내·소스 내 오래된 것부터(FIFO).
+      //     (합계 최대 캡+2건), 발행 48h 이내·최신순 (프로덕션 루프
+      //     1라운드, 2026-11-10 — 기존 FIFO에서 변경).
       //     해당 소스의 최종 40건 창 점유 8건 이상이면 그 소스 드레인 중단.
       //  5) 반환: 일반 대기열을 남은 슬롯에 채운다.
       //     반환 후 남은 대기열은 배치 상한 탈락(dropBatchFull)으로 종결한다.
@@ -544,6 +607,9 @@ export async function collectOnce(): Promise<CollectResult> {
         window40Counts.set(i.source, (window40Counts.get(i.source) ?? 0) + 1);
       }
       const decided = new Set<string>();
+      // 프로덕션 루프 1라운드 (2026-11-10): fast-track 우회로 입장한 URL
+      // (C2) — select()에서 레인 무관하게 stats.fastTrackBatch로 센다.
+      const fastTracked = new Set<string>();
       const capPool: RawEntry[] = [];
       const generalWaitlist: RawEntry[] = [];
       // Phase 2 후속 (Codex 리뷰 P1-2): 저빈도 선택량은 전 레인 공유 카운터로 센다.
@@ -599,6 +665,8 @@ export async function collectOnce(): Promise<CollectResult> {
       };
       const select = (e: RawEntry, lane: BatchLane) => {
         fresh.push({ ...e, lane });
+        // 프로덕션 루프 1라운드 (2026-11-10): fast-track 경유 건수 계측 (C2).
+        if (fastTracked.has(e.sourceUrl)) stats.fastTrackBatch += 1;
         existingUrls.add(e.sourceUrl); // 같은 배치 내 중복 방지
         sourceCounts.set(e.source, (sourceCounts.get(e.source) ?? 0) + 1);
         batchSourceCounts.set(e.source, (batchSourceCounts.get(e.source) ?? 0) + 1);
@@ -617,10 +685,11 @@ export async function collectOnce(): Promise<CollectResult> {
       // 저빈도 상한이 소스캡보다 앞선다 — 두 캡이 동시에 걸리면 batchCap 종결이다.
       // 반환: "ok" | "inDb" | "cap" | "batchCap" | "similar".
       const check = (e: RawEntry): "ok" | "inDb" | "cap" | "batchCap" | "similar" => {
-        const cap = admissionCapDecision({
+        const rawCap = admissionCapDecision({
           inDb: existingUrls.has(e.sourceUrl),
           sourceCount: sourceCounts.get(e.source) ?? 0,
-          sourceCap: SOURCE_CAP,
+          // 프로덕션 루프 1라운드 (2026-11-10): 차등 소스캡 (C1) — 고정 6 대체.
+          sourceCap: sourceCapForSourceId(e.sourceId),
           batchCount: batchSourceCounts.get(e.source) ?? 0,
           batchSourceCap: BATCH_SOURCE_CAP,
           isLowFreq: Boolean(e.sourceId && LOW_FREQ_SOURCE_IDS.has(e.sourceId)),
@@ -629,6 +698,15 @@ export async function collectOnce(): Promise<CollectResult> {
             ? (lowFreqSelectedBySource.get(e.sourceId) ?? 0)
             : 0,
         });
+        // 프로덕션 루프 1라운드 (2026-11-10): 이벤트 fast-track (C2) —
+        // 소스캡에 걸렸어도 이벤트 힌트가 있으면 배치 소스캡만 재평가한다.
+        const cap = capBypassDecision(
+          rawCap,
+          e.title,
+          batchSourceCounts.get(e.source) ?? 0,
+          BATCH_SOURCE_CAP,
+        );
+        if (cap === "pass" && rawCap === "cap") fastTracked.add(e.sourceUrl);
         if (cap !== "pass") return cap;
         if (findSimilar(e)) return "similar";
         return "ok";
@@ -701,12 +779,13 @@ export async function collectOnce(): Promise<CollectResult> {
         }
       }
       stats.lowFreqBatch = lowFreqUsed;
-      // 4) 드레인 파일럿: 풀에서 발행 48h 이내만, 오래된 것부터(FIFO).
+      // 4) 드레인 파일럿: 풀에서 발행 48h 이내만, 최신순으로 본다
+      // (프로덕션 루프 1라운드, 2026-11-10 — 기존 FIFO에서 변경, C3).
       // 소스당 회차 1건·24h 추가 2건·창 점유 8건·배치 소스당 4건을 모두 지킨다.
       stats.drainCandidates = capPool.length;
       const drainEligible = capPool
         .filter((e) => Date.now() - e.date <= DRAIN_MAX_AGE_MS)
-        .sort((a, b) => a.date - b.date);
+        .sort(byDrainRecency);
       let drainUsed = 0;
       const drainPerSource = new Map<string, number>();
       const drainSelected = new Set<string>();
@@ -714,7 +793,14 @@ export async function collectOnce(): Promise<CollectResult> {
         if (drainUsed >= DRAIN_ROUND_MAX || fresh.length >= BATCH_MAX) break;
         if ((drainPerSource.get(e.source) ?? 0) >= DRAIN_PER_SOURCE_ROUND) continue;
         if ((window40Counts.get(e.source) ?? 0) >= 8) continue;
-        if (drainRemainingAllowance(sourceCounts.get(e.source) ?? 0) <= 0) continue;
+        // 프로덕션 루프 1라운드 (2026-11-10): 드레인 허용량도 차등 캡 기준 (C1).
+        if (
+          drainRemainingAllowance(
+            sourceCounts.get(e.source) ?? 0,
+            sourceCapForSourceId(e.sourceId),
+          ) <= 0
+        )
+          continue;
         if ((batchSourceCounts.get(e.source) ?? 0) >= BATCH_SOURCE_CAP) continue;
         // 저빈도 공유 상한은 드레인에서도 적용된다 — 초과분은 배치 소스캡
         // family로 즉시 종결한다 (풀 확정 시 소스캡으로 뭉개지 않게).
@@ -1486,11 +1572,27 @@ function fixBareEnding(s: string): string {
   ).trim();
 }
 
+/**
+ * 프로덕션 루프 1라운드 (2026-11-10): 팁 동적 태깅 판정 (C6) — 제목이
+ * 팁형(도구·프롬프트·가이드·무료 모델 등)이면 소스와 무관하게 tipLane
+ * 후보로 승격한다. [팁] 등급 판정 자체는 기존 데스크(Pass 1 tip)가 담당.
+ */
+export function isTipTitle(title: string): boolean {
+  return /오픈소스|프롬프트|튜토리얼|가이드|사용법|설정법|무료\s*(모델|공개)|로컬\s*LLM|cookbook|how\s*to|tutorial|cheat\s*sheet|치트시트/i.test(
+    title,
+  );
+}
+
 export function tooSimilar(a: string, b: string, da?: number, db?: number): boolean {
   const fa = foldTitle(a);
   const fb = foldTitle(b);
   if (!fa || !fb) return false;
   if (fa === fb) return true;
+  // 프로덕션 루프 1라운드 (2026-11-10): 날짜 가드 (C4) — 정확 일치 이후의
+  // 전 경로(부분문자열·앵커·토큰)에 적용한다. 발행 간격이 72시간을 넘으면
+  // 후속·별개 보도로 보고 유사 처리하지 않는다 (앵커 경로의 기존 72h
+  // 가드와 정합). 날짜가 없으면(미상) 기존 판정을 유지한다.
+  if (da != null && db != null && Math.abs(da - db) > 72 * 3600 * 1000) return false;
   if (fa.length >= 12 && fb.length >= 12 && (fa.includes(fb) || fb.includes(fa))) return true;
   // 주제 앵커 규칙 (P1): 핵심 고유명사 2개 이상 공유 → 같은 사건
   if (sharesTopicAnchor(a, b, da, db)) return true;
@@ -1539,6 +1641,10 @@ const ANCHOR_STOPWORDS = new Set([
   "출시", "발표", "공개", "진출", "확대", "돌입", "양산", "출하", "도입",
   "적용", "지원", "선정", "추진", "강화", "협력", "인수", "투자", "출범",
   "개최", "개시",
+  // 프로덕션 루프 1라운드 (2026-11-10): 시장·사건 상투어 (C4) — 서로 다른
+  // 사건이 "주가 급락" 같은 상투어 쌍만으로 앵커를 채우는 오탐 방지.
+  "주가", "급락", "급등", "상승", "하락", "의회", "조사", "압박", "전망",
+  "논쟁", "소송",
 ]);
 
 // 주제 앵커 규칙 (P1): 정규화된 고유명사 토큰(영문 2자+, 한글 2자+) 중
