@@ -192,6 +192,9 @@ export type CollectStats = {
   dropNewCap: number;
   /** insertItem 실패 */
   dropInsertFail: number;
+  /** 프로덕션 루프 1라운드 (2026-11-10): 이벤트 fast-track으로 소스캡을
+   *  우회해 배치에 들어간 건수 (C2). */
+  fastTrackBatch: number;
   /** 오류로 중단된 부분 집계일 때만 true. 항등식은 정상 완료 실행에서만 성립한다.
    *  B1: 데드라인 부분 성공(status "partial")인 회차도 true로 남긴다. */
   partial?: boolean;
