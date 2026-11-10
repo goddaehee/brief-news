@@ -31,8 +31,10 @@ const KEYS = [
   "tipSlotBatch", "tipSlotInserted", "lowFreqBatch", "lowFreqInserted", "generalWaitlist",
   // Codex 재리뷰 반영: 배치 상한 탈락 카운터
   "dropBatchFull",
+  // 프로덕션 루프 1라운드 (2026-11-10): fast-track 경유 카운터 (C2)
+  "fastTrackBatch",
 ];
-check("카운터 키 26개", Object.keys(stats).sort(), [...KEYS].sort());
+check("카운터 키 27개", Object.keys(stats).sort(), [...KEYS].sort());
 check("카운터 전부 0", KEYS.every((k) => (stats as unknown as Record<string, number>)[k] === 0), true);
 check("카운터 JSON 왕복", JSON.parse(JSON.stringify(stats)), stats);
 // 독립 인스턴스 (공유 참조 아님)
