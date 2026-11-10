@@ -20,7 +20,9 @@ export type NewsSource = {
 /** Public RSS endpoints the collector pulls. The same list is what a cron hits. */
 export const NEWS_SOURCES: NewsSource[] = [
   { id: "hn", name: "Hacker News", rss: "https://hnrss.org/newest?q=AI+OR+LLM+OR+GPT", rank: 7 },
-  { id: "geeknews", name: "GeekNews", rss: "https://news.hada.io/rss", rank: 8 },
+  // 프로덕션 루프 1라운드 (2026-11-10): 팁 후보 공급 확대 (C6) — geeknews와
+  // 아래 huggingface에 tipLane을 추가한다 (기존 레인 소스는 2개뿐이었다).
+  { id: "geeknews", name: "GeekNews", rss: "https://news.hada.io/rss", rank: 8, tipLane: true },
   { id: "aitimes", name: "AI타임스", rss: "https://www.aitimes.com/rss/allArticle.xml", rank: 10 },
   {
     id: "aitimeskr",
@@ -84,7 +86,7 @@ export const NEWS_SOURCES: NewsSource[] = [
     rss: "https://deepmind.google/blog/rss.xml",
     rank: 8,
   },
-  { id: "huggingface", name: "Hugging Face", rss: "https://huggingface.co/blog/feed.xml", rank: 6 },
+  { id: "huggingface", name: "Hugging Face", rss: "https://huggingface.co/blog/feed.xml", rank: 6, tipLane: true },
   {
     id: "nvidia",
     name: "NVIDIA",
